@@ -166,20 +166,61 @@ fn blob(repo: &Path, commit: &str, path: &str) -> Option<Vec<u8>> {
     run(git(repo).args(["show", &format!("{commit}:{path}")])).ok()
 }
 
+/// Text with CRLF line endings turned into LF, so files compare equal no
+/// matter how git converted them (Windows keeps CRLF on disk, LF in git).
+fn lf(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\r' && bytes.get(i + 1) == Some(&b'\n') {
+            i += 1;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    out
+}
+
+fn crlf(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len() + bytes.len() / 20);
+    for &b in bytes {
+        if b == b'\n' {
+            out.push(b'\r');
+        }
+        out.push(b);
+    }
+    out
+}
+
+fn is_text(bytes: &[u8]) -> bool {
+    std::str::from_utf8(bytes).is_ok() && !bytes.contains(&0)
+}
+
 /// Bring the task's changes into the workspace, file by file.
+///
+/// Comparisons and three-way merges run on LF-normalised text; merged text is
+/// written back with the workspace file's own line endings.
 pub fn merge(sb: &Sandbox, result: &str, list: &[Change], task_id: &str) -> Result<MergeOutcome, String> {
     let mut outcome = MergeOutcome::default();
     for change in list {
         let target = sb.repo.join(&change.path);
         let base = blob(&sb.repo, &sb.base, &change.path);
-        let theirs = blob(&sb.repo, result, &change.path);
+        // What the member actually left on disk (its line endings included);
+        // fall back to the snapshot if the file can't be read.
+        let theirs = if change.status == "D" {
+            None
+        } else {
+            std::fs::read(sb.path.join(&change.path)).ok().or_else(|| blob(&sb.repo, result, &change.path))
+        };
         let ours = std::fs::read(&target).ok();
+        let norm = |b: &Option<Vec<u8>>| b.as_ref().map(|v| if is_text(v) { lf(v) } else { v.clone() });
 
-        if ours == theirs {
+        if norm(&ours) == norm(&theirs) {
             outcome.merged.push(change.path.clone());
             continue;
         }
-        if ours == base {
+        if norm(&ours) == norm(&base) {
             // The workspace didn't touch this file since the task started.
             match &theirs {
                 Some(bytes) => {
@@ -201,32 +242,33 @@ pub fn merge(sb: &Sandbox, result: &str, list: &[Change], task_id: &str) -> Resu
             continue;
         };
         let b = base.clone().unwrap_or_default();
-        if std::str::from_utf8(o).is_err() || std::str::from_utf8(t).is_err() || std::str::from_utf8(&b).is_err() {
+        if !is_text(o) || !is_text(t) || !is_text(&b) {
             outcome.conflicts.push(change.path.clone());
             continue;
         }
+        let workspace_crlf = o.windows(2).any(|w| w == b"\r\n");
         let tmp = std::env::temp_dir().join(format!("baton-merge-{}-{task_id}", std::process::id()));
         std::fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
         let (fo, fb, ft) = (tmp.join("ours"), tmp.join("base"), tmp.join("theirs"));
-        std::fs::write(&fo, o).map_err(|e| e.to_string())?;
-        std::fs::write(&fb, &b).map_err(|e| e.to_string())?;
-        std::fs::write(&ft, t).map_err(|e| e.to_string())?;
-        let out = git(&sb.repo)
-            .args(["merge-file", "-p", "-L", "workspace", "-L", "base", "-L", &format!("task {task_id}")])
+        std::fs::write(&fo, lf(o)).map_err(|e| e.to_string())?;
+        std::fs::write(&fb, lf(&b)).map_err(|e| e.to_string())?;
+        std::fs::write(&ft, lf(t)).map_err(|e| e.to_string())?;
+        let mut cmd = git(&sb.repo);
+        cmd.args(["merge-file", "-p", "-L", "workspace", "-L", "base", "-L", &format!("task {task_id}")])
             .arg(&fo)
             .arg(&fb)
-            .arg(&ft)
-            .output()
-            .map_err(|e| e.to_string())?;
+            .arg(&ft);
+        let out = cmd.output().map_err(|e| e.to_string())?;
         let _ = std::fs::remove_dir_all(&tmp);
+        let merged = if workspace_crlf { crlf(&out.stdout) } else { out.stdout.clone() };
         // merge-file exits with the number of conflicts; negative means error.
         match out.status.code() {
             Some(0) => {
-                std::fs::write(&target, &out.stdout).map_err(|e| e.to_string())?;
+                std::fs::write(&target, &merged).map_err(|e| e.to_string())?;
                 outcome.merged.push(change.path.clone());
             }
             Some(n) if n > 0 => {
-                std::fs::write(&target, &out.stdout).map_err(|e| e.to_string())?;
+                std::fs::write(&target, &merged).map_err(|e| e.to_string())?;
                 outcome.conflicts.push(change.path.clone());
             }
             _ => outcome.conflicts.push(change.path.clone()),
@@ -302,6 +344,35 @@ mod tests {
         remove(&sb);
         assert!(!sb.path.exists());
         assert!(repo.join("node_modules").is_dir(), "linked folder must survive removal");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Windows: files are CRLF on disk but LF inside git (core.autocrlf=true).
+    #[test]
+    fn crlf_workspace_merges_without_false_conflicts() {
+        let root = std::env::temp_dir().join(format!("baton-wt-crlf-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        sh(&repo, &["init", "-q"]);
+        sh(&repo, &["config", "core.autocrlf", "true"]);
+        std::fs::write(repo.join("a.txt"), "one\r\ntwo\r\nthree\r\n").unwrap();
+        std::fs::write(repo.join("b.txt"), "keep\r\n").unwrap();
+        sh(&repo, &["add", "."]);
+        sh(&repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init"]);
+
+        let sb = create(&repo, &root.join("wts"), "c1").unwrap();
+        // Task rewrites a.txt line 1 and b.txt; workspace edits a.txt line 3 only.
+        std::fs::write(sb.path.join("a.txt"), "ONE\r\ntwo\r\nthree\r\n").unwrap();
+        std::fs::write(sb.path.join("b.txt"), "task\r\n").unwrap();
+        std::fs::write(repo.join("a.txt"), "one\r\ntwo\r\nTHREE\r\n").unwrap();
+
+        let (result, list) = changes(&sb, "c1-r").unwrap();
+        let outcome = merge(&sb, &result, &list, "c1").unwrap();
+        assert!(outcome.conflicts.is_empty(), "false conflicts: {:?}", outcome.conflicts);
+        assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap(), "ONE\r\ntwo\r\nTHREE\r\n");
+        assert_eq!(std::fs::read_to_string(repo.join("b.txt")).unwrap(), "task\r\n");
+        remove(&sb);
         let _ = std::fs::remove_dir_all(&root);
     }
 }

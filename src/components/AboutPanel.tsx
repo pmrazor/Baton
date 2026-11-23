@@ -46,7 +46,7 @@ export default function AboutPanel() {
         <div>
           <div className="about-name">Baton</div>
           <div className="muted small">
-            {version ? `${formatVersion(version)} (${version})` : ""} · 여러 코딩 에이전트를 한곳에서
+            {version ? `버전 ${formatVersion(version)}` : ""} · 여러 코딩 에이전트를 한곳에서
           </div>
         </div>
         <div className="about-update">
