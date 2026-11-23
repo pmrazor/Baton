@@ -1,0 +1,366 @@
+import { useCallback, useEffect, useReducer, useRef, useState } from "react";
+import { ask, open } from "@tauri-apps/plugin-dialog";
+import { api, subscribe, toHubError } from "./api";
+import { initialState, reducer, type State } from "./store";
+import { profileOf, sessionKey, type Launch, type Session } from "./types";
+import Sidebar from "./components/Sidebar";
+import ChatView, { TitleBar, type Tab } from "./components/ChatView";
+import SettingsModal from "./components/SettingsModal";
+
+// Per-user conveniences only; losing them just resets the sidebar.
+const STORE = {
+  workspaces: "baton.workspaces",
+  workspace: "baton.workspace",
+  agent: "baton.lastAgent",
+  rail: "baton.sidebarRail",
+  active: "baton.activeSession",
+  launch: "baton.launch",
+};
+
+/** What goes to disk: everything except live-process state. */
+function toSaved({ busy: _busy, attached: _attached, draft: _draft, ...rest }: Session) {
+  return rest;
+}
+
+function fromSaved(v: any): Session | null {
+  if (!v || typeof v !== "object" || !v.key || !v.agentId || !v.sessionId || !v.cwd) return null;
+  return {
+    title: "대화",
+    items: [],
+    configOptions: [],
+    modes: null,
+    usage: null,
+    lastTurn: null,
+    createdAt: Date.now(),
+    launch: {},
+    ...v,
+    updatedAt: v.updatedAt ?? v.createdAt ?? Date.now(),
+    busy: false,
+    draft: false,
+    attached: false,
+  };
+}
+
+function read<T>(key: string, fallback: T): T {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? (JSON.parse(raw) as T) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function write(key: string, value: unknown) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // Ignore: storage may be unavailable.
+  }
+}
+
+function init(): State {
+  const workspaces = read<string[]>(STORE.workspaces, []);
+  const workspace = read<string | null>(STORE.workspace, null);
+  return { ...initialState, workspaces, workspace: workspace && workspaces.includes(workspace) ? workspace : workspaces[0] ?? null };
+}
+
+if (navigator.userAgent.includes("Mac")) document.documentElement.classList.add("mac");
+
+export default function App() {
+  const [state, dispatch] = useReducer(reducer, undefined, init);
+  const [connecting, setConnecting] = useState<string | null>(null);
+  const [rail, setRail] = useState(() => read<boolean>(STORE.rail, false));
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [tab, setTab] = useState<Tab>("chat");
+  const [historyLoaded, setHistoryLoaded] = useState(false);
+  const creating = useRef(false);
+  const attaching = useRef<string | null>(null);
+  const saved = useRef(new Map<string, Session>());
+
+  useEffect(() => {
+    api.listAgents().then((agents) => dispatch({ type: "agents", agents }));
+    api.listProfiles().then((profiles) => dispatch({ type: "profiles", profiles }));
+
+    api
+      .loadSessions()
+      .then((raw) => {
+        const sessions = raw.map(fromSaved).filter((s): s is Session => s !== null);
+        sessions.sort((a, b) => a.updatedAt - b.updatedAt);
+        sessions.forEach((s) => saved.current.set(s.key, s));
+        dispatch({ type: "restore", sessions, activeKey: read<string | null>(STORE.active, null) });
+      })
+      .catch((e) => console.error("대화 기록을 불러오지 못했어요", e))
+      .finally(() => setHistoryLoaded(true));
+
+    let unlisten: (() => void) | null = null;
+    let disposed = false;
+    subscribe({
+      onUpdate: (agentId, profileId, sessionId, update) =>
+        dispatch({ type: "update", agentId, profileId, sessionId, update }),
+      onAuth: (agentId, profileId, status) => dispatch({ type: "auth", agentId, profileId, status }),
+      onPermission: (request) => dispatch({ type: "permissionAdd", request }),
+      onStatus: (agentId, status, message) => {
+        dispatch({ type: "agentStatus", agentId, status, message });
+        api.listAgents().then((agents) => dispatch({ type: "agents", agents }));
+      },
+      onLog: (agentId, line) => dispatch({ type: "log", agentId, line }),
+    }).then((off) => (disposed ? off() : (unlisten = off)));
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
+  useEffect(() => write(STORE.workspaces, state.workspaces), [state.workspaces]);
+  useEffect(() => write(STORE.workspace, state.workspace), [state.workspace]);
+  useEffect(() => write(STORE.rail, rail), [rail]);
+  useEffect(() => {
+    if (historyLoaded) write(STORE.active, state.activeKey);
+  }, [state.activeKey, historyLoaded]);
+
+  // Persist changed conversations, debounced so streaming doesn't hammer the disk.
+  useEffect(() => {
+    if (!historyLoaded) return;
+    const timer = setTimeout(() => {
+      for (const s of state.sessions) {
+        if (s.draft || saved.current.get(s.key) === s) continue;
+        saved.current.set(s.key, s);
+        api.saveSession(s.key, toSaved(s)).catch((e) => console.error("대화 저장 실패", e));
+      }
+    }, 800);
+    return () => clearTimeout(timer);
+  }, [state.sessions, historyLoaded]);
+
+  const addWorkspace = useCallback(async () => {
+    const dir = await open({ directory: true, multiple: false, title: "워크스페이스 폴더 선택" });
+    if (typeof dir === "string") dispatch({ type: "workspaceAdd", path: dir });
+  }, []);
+
+  /** Open a draft chat right away so the model can be picked before the first message. */
+  const newChat = useCallback(
+    async (workspace?: string, agentId?: string, launchOverride?: Launch) => {
+      const ws = workspace ?? state.workspace;
+      if (!ws) return addWorkspace();
+      const agent = agentId ?? read<string | null>(STORE.agent, null) ?? state.agents[0]?.id;
+      if (!agent || creating.current) return;
+      // Launch choices (permission, account, …) are remembered per agent for the next new chat.
+      const launch = { ...read<Launch>(`${STORE.launch}.${agent}`, {}), ...launchOverride };
+
+      creating.current = true;
+      setConnecting(agent);
+      dispatch({ type: "dropDrafts" });
+      dispatch({ type: "workspaceSelect", path: ws });
+      try {
+        const res = await api.newSession(agent, ws, launch);
+        write(STORE.agent, agent);
+        write(`${STORE.launch}.${agent}`, launch);
+        dispatch({
+          type: "sessionCreated",
+          agentId: agent,
+          sessionId: res.sessionId,
+          cwd: ws,
+          title: "새 대화",
+          launch,
+          configOptions: res.configOptions ?? [],
+          modes: res.modes ?? null,
+        });
+      } catch (e) {
+        const err = toHubError(e);
+        dispatch({
+          type: "authPrompt",
+          prompt: {
+            agentId: agent,
+            profileId: profileOf(launch),
+            message: err.authRequired ? "로그인이 필요합니다." : err.message,
+            methods: err.authRequired ? (err.authMethods ?? []) : [],
+          },
+        });
+      } finally {
+        creating.current = false;
+        setConnecting(null);
+      }
+    },
+    [state.workspace, state.agents, addWorkspace],
+  );
+
+  const setConfig = useCallback(async (session: Session, configId: string, value: unknown) => {
+    try {
+      const res = await api.setConfigOption(session.agentId, session.sessionId, configId, value);
+      if (res?.configOptions) dispatch({ type: "configOptions", key: session.key, configOptions: res.configOptions });
+    } catch (e) {
+      dispatch({ type: "notice", key: session.key, text: toHubError(e).message, tone: "error" });
+    }
+  }, []);
+
+  const active = state.sessions.find((s) => s.key === state.activeKey) ?? null;
+
+  useEffect(() => setTab("chat"), [state.activeKey]);
+
+  // With a workspace open there is always a chat ready to type into.
+  useEffect(() => {
+    if (historyLoaded && state.workspace && !active && !connecting && state.agents.length > 0 && !state.authPrompt) {
+      newChat();
+    }
+  }, [historyLoaded, state.workspace, active, connecting, state.agents.length, state.authPrompt, newChat]);
+
+  // A conversation restored from disk reconnects to its agent session when opened.
+  useEffect(() => {
+    if (!active || active.attached || active.draft || attaching.current === active.key) return;
+    const s = active;
+    attaching.current = s.key;
+    (async () => {
+      try {
+        const res = await api.resumeSession(s.agentId, s.sessionId, s.cwd, s.launch);
+        const live = res.configOptions ?? [];
+        dispatch({ type: "attached", key: s.key, configOptions: live, modes: res.modes ?? null });
+        // Re-apply the model/effort/mode the user had picked.
+        for (const prev of s.configOptions) {
+          const now = live.find((o) => o.id === prev.id);
+          if (now && now.currentValue !== prev.currentValue) await setConfig(s, prev.id, prev.currentValue);
+        }
+      } catch (e) {
+        try {
+          const res = await api.newSession(s.agentId, s.cwd, s.launch);
+          dispatch({
+            type: "rekey",
+            key: s.key,
+            sessionId: res.sessionId,
+            configOptions: res.configOptions ?? [],
+            modes: res.modes ?? null,
+          });
+          saved.current.delete(s.key);
+          api.deleteSession(s.key).catch(() => {});
+          dispatch({
+            type: "notice",
+            key: sessionKey(s.agentId, res.sessionId),
+            text: `이전 세션을 이어 붙이지 못해 새 세션으로 이어가요. 에이전트는 위 대화를 기억하지 못해요. (${toHubError(e).message})`,
+            tone: "info",
+          });
+        } catch (e2) {
+          dispatch({ type: "notice", key: s.key, text: toHubError(e2).message, tone: "error" });
+        }
+      } finally {
+        attaching.current = null;
+      }
+    })();
+  }, [active, setConfig]);
+
+  const deleteSession = useCallback(async (key: string) => {
+    const ok = await ask("이 대화를 삭제할까요? 되돌릴 수 없어요.", { title: "대화 삭제", kind: "warning" });
+    if (!ok) return;
+    dispatch({ type: "closeSession", key });
+    saved.current.delete(key);
+    api.deleteSession(key).catch((e) => console.error("대화 삭제 실패", e));
+  }, []);
+
+  const sendPrompt = useCallback(async (session: Session, text: string) => {
+    const { key, agentId, sessionId } = session;
+    const profileId = profileOf(session.launch);
+    dispatch({ type: "userMessage", key, text });
+    dispatch({ type: "busy", key, busy: true });
+    const started = performance.now();
+    try {
+      const res = await api.sendPrompt(agentId, sessionId, text);
+      dispatch({
+        type: "turnDone",
+        key,
+        stats: {
+          durationMs: performance.now() - started,
+          inputTokens: res.usage?.inputTokens,
+          outputTokens: res.usage?.outputTokens,
+          cachedReadTokens: res.usage?.cachedReadTokens,
+        },
+      });
+      if (res.stopReason === "cancelled") dispatch({ type: "notice", key, text: "중단됨", tone: "info" });
+      else if (res.stopReason === "refusal") dispatch({ type: "notice", key, text: "에이전트가 요청을 거절했습니다", tone: "error" });
+      else if (res.stopReason !== "end_turn") dispatch({ type: "notice", key, text: `종료: ${res.stopReason}`, tone: "info" });
+    } catch (e) {
+      const err = toHubError(e);
+      dispatch({ type: "notice", key, text: err.message, tone: "error" });
+      if (err.authRequired) {
+        dispatch({
+          type: "authPrompt",
+          prompt: { agentId, profileId, message: "로그인이 필요합니다.", methods: err.authMethods ?? [] },
+        });
+      }
+    } finally {
+      dispatch({ type: "busy", key, busy: false });
+    }
+  }, []);
+
+  const cancel = useCallback(
+    async (session: Session) => {
+      state.permissions
+        .filter((p) => sessionKey(p.agentId, p.sessionId) === session.key)
+        .forEach((p) => dispatch({ type: "permissionRemove", key: p.key }));
+      await api.cancelPrompt(session.agentId, session.sessionId);
+    },
+    [state.permissions],
+  );
+
+  const answerPermission = useCallback(async (key: string, optionId: string | null) => {
+    dispatch({ type: "permissionRemove", key });
+    try {
+      await api.respondPermission(key, optionId);
+    } catch {
+      // Already resolved (e.g. cancelled); nothing to do.
+    }
+  }, []);
+
+
+  const setMode = useCallback(async (session: Session, modeId: string) => {
+    try {
+      await api.setMode(session.agentId, session.sessionId, modeId);
+      dispatch({ type: "mode", key: session.key, modeId });
+    } catch (e) {
+      dispatch({ type: "notice", key: session.key, text: toHubError(e).message, tone: "error" });
+    }
+  }, []);
+
+  return (
+    <div className={`app ${rail ? "rail-mode" : ""}`}>
+      {rail && <TitleBar className="full" state={state} session={active} />}
+      <Sidebar
+        agents={state.agents}
+        workspaces={state.workspaces}
+        workspace={state.workspace}
+        sessions={state.sessions}
+        activeKey={state.activeKey}
+        permissions={state.permissions}
+        onNewChat={(ws) => newChat(ws)}
+        onAddWorkspace={addWorkspace}
+        onSelectWorkspace={(path) => dispatch({ type: "workspaceSelect", path })}
+        onRemoveWorkspace={(path) => dispatch({ type: "workspaceRemove", path })}
+        onActivate={(key) => dispatch({ type: "activate", key })}
+        onCloseSession={deleteSession}
+        rail={rail}
+        onToggleRail={() => setRail((r) => !r)}
+        onOpenSettings={() => setSettingsOpen(true)}
+      />
+      <ChatView
+        state={state}
+        session={active}
+        connecting={connecting ?? (active && !active.attached ? active.agentId : null)}
+        tab={tab}
+        showTitle={!rail}
+        onTab={setTab}
+        onAddWorkspace={addWorkspace}
+        onNewChat={newChat}
+        onSend={sendPrompt}
+        onCancel={cancel}
+        onPermission={answerPermission}
+        onSetConfig={setConfig}
+        onSetMode={setMode}
+        onDismissAuth={() => dispatch({ type: "authPrompt", prompt: null })}
+      />
+      {settingsOpen && (
+        <SettingsModal
+          state={state}
+          onProfilesChanged={() => api.listProfiles().then((profiles) => dispatch({ type: "profiles", profiles }))}
+          onClose={() => setSettingsOpen(false)}
+        />
+      )}
+    </div>
+  );
+}
