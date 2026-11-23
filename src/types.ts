@@ -106,6 +106,8 @@ export interface PlanEntry {
 
 export type ChatItem =
   | { kind: "user"; id: string; text: string; startedAt?: number; durationMs?: number }
+  /** An instruction a lead agent gave this task (agent mode). Starts a turn like a user message. */
+  | { kind: "brief"; id: string; text: string; label: string; startedAt?: number; durationMs?: number }
   | { kind: "assistant"; id: string; text: string }
   | { kind: "thought"; id: string; text: string }
   | ({ kind: "tool"; id: string; toolKind: string } & Omit<ToolCallFields, "kind">)
@@ -152,6 +154,12 @@ export interface Session {
   attached: boolean;
   /** Launch option values the session's process was started with. */
   launch: Launch;
+  /** Set on a lead (agent mode) conversation. */
+  lead?: { teamId: string };
+  /** Tasks this lead handed out, newest last. */
+  tasks?: TaskInfo[];
+  /** Set on a task's conversation: the lead it belongs to. */
+  parent?: { key: string; taskId: string };
   /** Context-window usage reported by the agent (`usage_update`). */
   usage: { used: number; size: number; cost?: { amount: number; currency: string } | null } | null;
   /** Numbers from the last finished turn. */
@@ -183,3 +191,53 @@ export interface AccountUsage {
   entries: Record<string, QuotaEntry>;
   updatedAt: number;
 }
+
+export type TaskStatus = "queued" | "starting" | "waiting_lock" | "running" | "done" | "failed" | "cancelled";
+
+/** A task a lead delegated (mirrors the backend's TaskInfo). */
+export interface TaskInfo {
+  id: string;
+  leadAgentId: string;
+  leadSessionId: string;
+  title: string;
+  memberId: string;
+  memberName: string;
+  agentId: string;
+  sessionId: string | null;
+  status: TaskStatus;
+  writes: boolean;
+  startedAt: number | null;
+  endedAt: number | null;
+  error: string | null;
+  /** Runs in its own git worktree; merged into the workspace on request. */
+  isolated: boolean;
+  /** Changed files, e.g. "M src/a.rs" (isolated tasks). */
+  changes: string[];
+  mergeState: "none" | "pending" | "merged" | "conflict" | "discarded" | null;
+  conflicts: string[];
+  /** The lead's user message (turn) this task was created in. */
+  turnId?: string;
+}
+
+export const isTaskActive = (s: TaskStatus) => s !== "done" && s !== "failed" && s !== "cancelled";
+
+export interface TeamMember {
+  id: string;
+  name: string;
+  agentId: string;
+  profileId: string;
+  launch: Record<string, string>;
+  config: Record<string, unknown>;
+  role: string;
+}
+
+export interface Team {
+  id: string;
+  name: string;
+  members: TeamMember[];
+  maxParallel: number;
+  /** How file-writing tasks share a git workspace. */
+  isolation: "worktree" | "shared";
+}
+
+export const AUTO_TEAM = "auto";

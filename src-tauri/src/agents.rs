@@ -46,6 +46,9 @@ pub struct AgentDef {
     /// Shown next to the login button, e.g. how to finish the login.
     #[serde(default)]
     pub login_note: String,
+    /// Config options for a lead (agent mode) session, on top of `defaultConfig`.
+    #[serde(default)]
+    pub lead_config: HashMap<String, Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -111,6 +114,8 @@ pub fn default_agents() -> Vec<AgentDef> {
                 "--claudeai".into(),
             ],
             login_note: "브라우저에서 Claude 계정으로 로그인하면 끝나요.".into(),
+            // `opus` is Claude Code's alias for the newest Opus, so it follows upgrades.
+            lead_config: HashMap::from([("model".into(), json!("opus"))]),
         },
         AgentDef {
             id: "dsh".into(),
@@ -153,6 +158,7 @@ pub fn default_agents() -> Vec<AgentDef> {
             profile_env: Some("DSH_HOME".into()),
             login_args: vec!["web".into()],
             login_note: "열린 dsh 웹 화면에서 DeepSeek 계정으로 로그인한 뒤, 터미널에서 Ctrl+C로 종료하세요.".into(),
+            lead_config: HashMap::from([("model".into(), json!(r#"["deepseek-account","deepseek-v4-pro"]"#))]),
         },
     ]
 }
@@ -193,6 +199,10 @@ fn upgrade_builtins(agents: &mut [AgentDef]) -> bool {
         let Some(builtin) = defaults.iter().find(|d| d.id == agent.id) else { continue };
         if agent.launch_options.is_empty() && !builtin.launch_options.is_empty() {
             agent.launch_options = builtin.launch_options.clone();
+            changed = true;
+        }
+        if agent.lead_config.is_empty() && !builtin.lead_config.is_empty() {
+            agent.lead_config = builtin.lead_config.clone();
             changed = true;
         }
         if agent.profile_env.is_none() && builtin.profile_env.is_some() {

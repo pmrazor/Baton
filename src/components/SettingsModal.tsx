@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { Check, Copy, LogIn, Pencil, Plus, Trash2, X } from "lucide-react";
 import { api, toHubError } from "../api";
+import TeamsPanel from "./TeamsPanel";
 import type { State } from "../store";
 import { accountKey, DEFAULT_PROFILE, type AgentInfo, type AgentStatus } from "../types";
 
@@ -16,10 +17,20 @@ const STATUS_LABEL: Record<AgentStatus, string> = {
 interface Props {
   state: State;
   onProfilesChanged: () => void;
+  onTeamsChanged: () => void;
   onClose: () => void;
 }
 
-export default function SettingsModal({ state, onProfilesChanged, onClose }: Props) {
+type SettingsTab = "accounts" | "teams" | "agents";
+
+const SETTINGS_TABS: [SettingsTab, string][] = [
+  ["accounts", "계정"],
+  ["teams", "팀"],
+  ["agents", "에이전트"],
+];
+
+export default function SettingsModal({ state, onProfilesChanged, onTeamsChanged, onClose }: Props) {
+  const [tab, setTab] = useState<SettingsTab>("accounts");
   const [configPath, setConfigPath] = useState("");
   const [copied, setCopied] = useState(false);
 
@@ -39,55 +50,66 @@ export default function SettingsModal({ state, onProfilesChanged, onClose }: Pro
             <X size={17} />
           </button>
         </div>
-
-        <h3>계정</h3>
-        {state.agents
-          .filter((a) => a.multiAccount)
-          .map((a) => (
-            <AgentAccounts key={a.id} agent={a} state={state} onChanged={onProfilesChanged} />
+        <nav className="settings-tabs" role="tablist">
+          {SETTINGS_TABS.map(([id, label]) => (
+            <button key={id} role="tab" aria-selected={tab === id} onClick={() => setTab(id)}>
+              {label}
+            </button>
           ))}
+        </nav>
 
-        <h3>에이전트</h3>
-        <ul className="settings-agents">
-          {state.agents.map((a) => {
-            const st = state.status[a.id]?.status ?? (a.running ? "ready" : "idle");
-            return (
-              <li key={a.id}>
-                <span className={`dot dot-${st}`} />
-                <div className="grow">
-                  <div>{a.name}</div>
-                  <div className="muted small">
-                    {STATUS_LABEL[st]}
-                    {state.status[a.id]?.message ? ` · ${state.status[a.id]?.message}` : ""}
-                  </div>
-                </div>
-                {st === "ready" && (
-                  <button className="btn" onClick={() => api.stopAgent(a.id)}>
-                    중지
-                  </button>
-                )}
-              </li>
-            );
-          })}
-        </ul>
+        {tab === "accounts" &&
+          state.agents
+            .filter((a) => a.multiAccount)
+            .map((a) => <AgentAccounts key={a.id} agent={a} state={state} onChanged={onProfilesChanged} />)}
 
-        <h3>에이전트 설정 파일</h3>
-        <p className="muted small">실행 명령, 인자, 환경 변수, 세션 기본값을 바꿀 수 있어요. 수정 후 앱을 다시 시작하세요.</p>
-        <div className="path-row">
-          <code className="ellipsis">{configPath}</code>
-          <button
-            className="icon-btn"
-            title="경로 복사"
-            onClick={() =>
-              navigator.clipboard.writeText(configPath).then(() => {
-                setCopied(true);
-                setTimeout(() => setCopied(false), 1200);
-              })
-            }
-          >
-            {copied ? <Check size={15} /> : <Copy size={15} />}
-          </button>
-        </div>
+        {tab === "teams" && <TeamsPanel state={state} onChanged={onTeamsChanged} />}
+
+        {tab === "agents" && (
+          <>
+            <h3>에이전트</h3>
+            <ul className="settings-agents">
+              {state.agents.map((a) => {
+                const st = state.status[a.id]?.status ?? (a.running ? "ready" : "idle");
+                return (
+                  <li key={a.id}>
+                    <span className={`dot dot-${st}`} />
+                    <div className="grow">
+                      <div>{a.name}</div>
+                      <div className="muted small">
+                        {STATUS_LABEL[st]}
+                        {state.status[a.id]?.message ? ` · ${state.status[a.id]?.message}` : ""}
+                      </div>
+                    </div>
+                    {st === "ready" && (
+                      <button className="btn" onClick={() => api.stopAgent(a.id)}>
+                        중지
+                      </button>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+
+            <h3>에이전트 설정 파일</h3>
+            <p className="muted small">실행 명령, 인자, 환경 변수, 세션 기본값을 바꿀 수 있어요. 수정 후 앱을 다시 시작하세요.</p>
+            <div className="path-row">
+              <code className="ellipsis">{configPath}</code>
+              <button
+                className="icon-btn"
+                title="경로 복사"
+                onClick={() =>
+                  navigator.clipboard.writeText(configPath).then(() => {
+                    setCopied(true);
+                    setTimeout(() => setCopied(false), 1200);
+                  })
+                }
+              >
+                {copied ? <Check size={15} /> : <Copy size={15} />}
+              </button>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );

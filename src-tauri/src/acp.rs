@@ -56,11 +56,14 @@ impl std::fmt::Display for RpcError {
     }
 }
 
-/// Messages the agent sends to us without us asking.
+/// Everything the agent sends, in the order it was sent. Responses travel
+/// through here too (resolved with `AcpConnection::resolve`), so a turn's
+/// final `session/update`s are always handled before its prompt response.
 #[derive(Debug)]
 pub enum Incoming {
     Request { id: Value, method: String, params: Value },
     Notification { method: String, params: Value },
+    Response { id: i64, result: Result<Value, RpcError> },
     Stderr(String),
     Exited(Option<i32>),
 }
@@ -99,13 +102,12 @@ impl AcpConnection {
         let stderr = child.stderr.take().expect("stderr is piped");
 
         let (tx, rx) = mpsc::unbounded_channel();
-        let pending: Pending = Arc::default();
 
         let conn = Arc::new(Self {
             stdin: Mutex::new(stdin),
             child: Mutex::new(child),
             next_id: AtomicI64::new(1),
-            pending: pending.clone(),
+            pending: Pending::default(),
         });
 
         let stderr_tx = tx.clone();
@@ -125,17 +127,15 @@ impl AcpConnection {
                     continue;
                 }
                 match serde_json::from_str::<Value>(line) {
-                    Ok(msg) => route_message(msg, &pending, &tx).await,
+                    Ok(msg) => route_message(msg, &tx),
                     Err(_) => {
                         let _ = tx.send(Incoming::Stderr(format!("[non-JSON stdout] {line}")));
                     }
                 }
             }
 
-            // stdout closed: the agent is gone. Fail everything still waiting.
-            for (_, waiter) in pending.lock().await.drain() {
-                let _ = waiter.send(Err(RpcError::new(-32000, "agent process exited")));
-            }
+            // stdout closed: the agent is gone. The consumer fails whatever is
+            // still pending once it reaches `Exited`, after any queued responses.
             let code = reader_conn.child.lock().await.wait().await.ok().and_then(|s| s.code());
             let _ = tx.send(Incoming::Exited(code));
         });
@@ -169,6 +169,20 @@ impl AcpConnection {
         self.write(&msg).await
     }
 
+    /// Fail every request still waiting; call on `Incoming::Exited`.
+    pub async fn fail_pending(&self) {
+        for (_, waiter) in self.pending.lock().await.drain() {
+            let _ = waiter.send(Err(RpcError::new(-32000, "agent process exited")));
+        }
+    }
+
+    /// Complete one of our requests. Call it from the `Incoming` consumer.
+    pub async fn resolve(&self, id: i64, result: Result<Value, RpcError>) {
+        if let Some(waiter) = self.pending.lock().await.remove(&id) {
+            let _ = waiter.send(result);
+        }
+    }
+
     pub fn kill(&self) {
         // If the lock is held, the reader task is already waiting on exit.
         if let Ok(mut child) = self.child.try_lock() {
@@ -185,7 +199,7 @@ impl AcpConnection {
     }
 }
 
-async fn route_message(msg: Value, pending: &Pending, tx: &mpsc::UnboundedSender<Incoming>) {
+fn route_message(msg: Value, tx: &mpsc::UnboundedSender<Incoming>) {
     let method = msg.get("method").and_then(Value::as_str).map(str::to_owned);
     let id = msg.get("id").cloned().filter(|id| !id.is_null());
     let params = msg.get("params").cloned().unwrap_or(Value::Null);
@@ -199,12 +213,11 @@ async fn route_message(msg: Value, pending: &Pending, tx: &mpsc::UnboundedSender
         }
         (None, Some(id)) => {
             let Some(id) = id.as_i64() else { return };
-            let Some(waiter) = pending.lock().await.remove(&id) else { return };
             let result = match msg.get("error") {
                 Some(err) => Err(RpcError::from_value(err)),
                 None => Ok(msg.get("result").cloned().unwrap_or(Value::Null)),
             };
-            let _ = waiter.send(result);
+            let _ = tx.send(Incoming::Response { id, result });
         }
         (None, None) => {}
     }

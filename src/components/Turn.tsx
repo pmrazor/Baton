@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
 import { Atom, ChevronRight } from "lucide-react";
-import type { ChatItem } from "../types";
+import type { AgentInfo, ChatItem, PermissionRequest, TaskInfo } from "../types";
 import { ChatItemView, Md, PlanView, ThoughtRow, ToolRow } from "./Messages";
+import TaskCard from "./TaskCard";
 
-type UserItem = Extract<ChatItem, { kind: "user" }>;
+/** What starts a turn: the user's message, or a lead's instruction to a task. */
+type UserItem = Extract<ChatItem, { kind: "user" | "brief" }>;
 
 export interface TurnGroup {
   key: string;
@@ -38,7 +40,7 @@ export function groupTurns(items: ChatItem[]): TurnGroup[] {
   };
 
   for (const item of items) {
-    if (item.kind === "user") {
+    if (item.kind === "user" || item.kind === "brief") {
       flush();
       user = item;
       rest = [];
@@ -56,12 +58,38 @@ function fmtDuration(ms: number) {
   return `${Math.floor(s / 60)}분 ${Math.round(s % 60)}초`;
 }
 
-export function TurnView({ turn, running, isLast }: { turn: TurnGroup; running: boolean; isLast: boolean }) {
+interface TurnProps {
+  turn: TurnGroup;
+  running: boolean;
+  isLast: boolean;
+  /** Tasks the lead created during this turn (agent mode). */
+  tasks?: TaskInfo[];
+  agents?: AgentInfo[];
+  permissions?: PermissionRequest[];
+  onOpen?: (sessionKey: string) => void;
+  onPermission?: (key: string, optionId: string | null) => void;
+  onMerge?: (taskId: string) => void;
+  onDiscard?: (taskId: string) => void;
+}
+
+export function TurnView(p: TurnProps) {
+  const { turn, running, isLast, tasks, agents, permissions, onOpen, onPermission } = p;
   return (
     <>
       {turn.user && <ChatItemView item={turn.user} isLast={false} />}
       {turn.process.length > 0 && (
         <ProcessGroup steps={turn.process} running={running} startedAt={turn.user?.startedAt} durationMs={turn.user?.durationMs} />
+      )}
+      {tasks && tasks.length > 0 && (
+        <TaskCard
+          tasks={tasks}
+          agents={agents ?? []}
+          permissions={permissions ?? []}
+          onOpen={onOpen ?? (() => {})}
+          onPermission={onPermission ?? (() => {})}
+          onMerge={p.onMerge ?? (() => {})}
+          onDiscard={p.onDiscard ?? (() => {})}
+        />
       )}
       {turn.answer && <ChatItemView item={turn.answer} isLast={isLast && !running} />}
       {turn.notices.map((n) => (

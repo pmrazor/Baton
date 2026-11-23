@@ -49,6 +49,10 @@ struct SessionHome {
     runtime_key: String,
     cwd: String,
     launch: Launch,
+    /// MCP servers the session was created with; resume must pass them again.
+    mcp_servers: Value,
+    /// ACP `_meta` the session was created with (agent-specific options).
+    meta: Value,
 }
 
 struct PendingPermission {
@@ -66,6 +70,15 @@ pub struct Hub {
     slots: std::sync::Mutex<HashMap<String, Slot>>,
     /// (agent id, session id) → home
     homes: std::sync::Mutex<HashMap<(String, String), SessionHome>>,
+    /// Latest plan-limit report per (agent, profile), for the orchestrator.
+    quotas: std::sync::Mutex<HashMap<(String, String), Value>>,
+    /// Last `configOptions` each agent reported (models, modes, effort). Agents
+    /// only reveal these when a session opens, so team settings read them here.
+    options: std::sync::Mutex<HashMap<String, Value>>,
+    options_file: std::path::PathBuf,
+    /// Sessions being loaded: their replayed updates are collected here
+    /// instead of going to the UI, which has no chat for them yet.
+    captures: std::sync::Mutex<HashMap<(String, String), Vec<Value>>>,
     permissions: std::sync::Mutex<HashMap<String, PendingPermission>>,
     next_permission: AtomicU64,
 }
@@ -114,13 +127,21 @@ pub struct AgentInfo {
 }
 
 impl Hub {
-    pub fn new(app: AppHandle, defs: Vec<AgentDef>, profiles: Arc<Profiles>) -> Self {
+    pub fn new(app: AppHandle, defs: Vec<AgentDef>, profiles: Arc<Profiles>, options_file: std::path::PathBuf) -> Self {
+        let options = std::fs::read(&options_file)
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default();
         Self {
             app,
             defs,
             profiles,
             slots: Default::default(),
             homes: Default::default(),
+            quotas: Default::default(),
+            options: std::sync::Mutex::new(options),
+            options_file,
+            captures: Default::default(),
             permissions: Default::default(),
             next_permission: AtomicU64::new(1),
         }
@@ -279,9 +300,22 @@ impl Hub {
         self.homes.lock().unwrap().insert((agent_id.to_string(), session_id.to_string()), home);
     }
 
-    pub async fn new_session(&self, agent_id: &str, cwd: &str, launch: &Launch) -> Result<Value, HubError> {
+    /// Create a session. `config` overrides the agent's default config options
+    /// (e.g. a team member's model); `mcp_servers` is an ACP `McpServer[]`.
+    pub async fn new_session(
+        &self,
+        agent_id: &str,
+        cwd: &str,
+        launch: &Launch,
+        mcp_servers: Value,
+        config: &HashMap<String, Value>,
+        meta: Value,
+    ) -> Result<Value, HubError> {
         let (key, rt) = self.runtime(agent_id, cwd, launch).await?;
-        let params = json!({ "cwd": cwd, "mcpServers": [] });
+        let mut params = json!({ "cwd": cwd, "mcpServers": mcp_servers });
+        if !meta.is_null() {
+            params["_meta"] = meta.clone();
+        }
         let mut session = rt
             .conn
             .request("session/new", params)
@@ -289,10 +323,12 @@ impl Hub {
             .map_err(|e| HubError::with_auth(e, &rt))?;
 
         let session_id = session.get("sessionId").and_then(Value::as_str).unwrap_or_default().to_string();
-        let home = SessionHome { runtime_key: key, cwd: cwd.to_string(), launch: launch.clone() };
+        let home = SessionHome { runtime_key: key, cwd: cwd.to_string(), launch: launch.clone(), mcp_servers, meta };
         self.remember(agent_id, &session_id, home, &rt);
 
-        for (config_id, value) in &self.def(agent_id)?.default_config {
+        let mut wanted = self.def(agent_id)?.default_config.clone();
+        wanted.extend(config.iter().map(|(k, v)| (k.clone(), v.clone())));
+        for (config_id, value) in &wanted {
             let params = json!({ "sessionId": session_id, "configId": config_id, "value": value });
             match rt.conn.request("session/set_config_option", params).await {
                 Ok(res) => {
@@ -303,6 +339,7 @@ impl Hub {
                 Err(e) => self.emit_log(agent_id, &format!("[hub] default config {config_id} 적용 실패: {e}")),
             }
         }
+        self.remember_options(agent_id, &session);
         Ok(session)
     }
 
@@ -314,14 +351,25 @@ impl Hub {
         session_id: &str,
         cwd: &str,
         launch: &Launch,
+        mcp_servers: Value,
+        meta: Value,
     ) -> Result<Value, HubError> {
         let (key, rt) = self.runtime(agent_id, cwd, launch).await?;
-        let home = SessionHome { runtime_key: key, cwd: cwd.to_string(), launch: launch.clone() };
+        let home = SessionHome {
+            runtime_key: key,
+            cwd: cwd.to_string(),
+            launch: launch.clone(),
+            mcp_servers: mcp_servers.clone(),
+            meta: meta.clone(),
+        };
         if rt.active_sessions.lock().unwrap().contains(session_id) {
             self.remember(agent_id, session_id, home, &rt);
             return Ok(json!({ "alreadyActive": true }));
         }
-        let params = json!({ "sessionId": session_id, "cwd": cwd, "mcpServers": [] });
+        let mut params = json!({ "sessionId": session_id, "cwd": cwd, "mcpServers": mcp_servers });
+        if !meta.is_null() {
+            params["_meta"] = meta;
+        }
         let res = match rt.conn.request("session/resume", params).await {
             Ok(res) => res,
             // Live in this process but unknown to us (e.g. created before a hub restart).
@@ -329,7 +377,94 @@ impl Hub {
             Err(e) => return Err(HubError::with_auth(e, &rt)),
         };
         self.remember(agent_id, session_id, home, &rt);
+        self.remember_options(agent_id, &res);
         Ok(res)
+    }
+
+    /// The agent's saved sessions for a folder (ACP `session/list`, all pages).
+    pub async fn list_sessions(&self, agent_id: &str, cwd: &str, launch: &Launch) -> Result<Vec<Value>, HubError> {
+        let (_, rt) = self.runtime(agent_id, cwd, launch).await?;
+        if rt.init.pointer("/agentCapabilities/sessionCapabilities/list").is_none() {
+            return Ok(Vec::new());
+        }
+        let mut out = Vec::new();
+        let mut cursor = Value::Null;
+        for _ in 0..20 {
+            let res = rt.conn.request("session/list", json!({ "cwd": cwd, "cursor": cursor })).await?;
+            out.extend(res.get("sessions").and_then(Value::as_array).cloned().unwrap_or_default());
+            cursor = res.get("nextCursor").cloned().unwrap_or(Value::Null);
+            if cursor.is_null() {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
+    /// Open a saved session in this app. Agents that support `session/load`
+    /// replay the conversation, returned as `updates`; others are resumed
+    /// (the agent remembers, but there is nothing to show).
+    pub async fn load_session(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        cwd: &str,
+        launch: &Launch,
+        mcp_servers: Value,
+        meta: Value,
+    ) -> Result<Value, HubError> {
+        let (key, rt) = self.runtime(agent_id, cwd, launch).await?;
+        let can_load = rt.init.pointer("/agentCapabilities/loadSession").and_then(Value::as_bool) == Some(true);
+        if !can_load || rt.active_sessions.lock().unwrap().contains(session_id) {
+            let mut res = self.resume_session(agent_id, session_id, cwd, launch, mcp_servers, meta).await?;
+            res["updates"] = json!([]);
+            res["replayed"] = json!(false);
+            return Ok(res);
+        }
+
+        let capture_key = (agent_id.to_string(), session_id.to_string());
+        self.captures.lock().unwrap().insert(capture_key.clone(), Vec::new());
+        let mut params = json!({ "sessionId": session_id, "cwd": cwd, "mcpServers": mcp_servers });
+        if !meta.is_null() {
+            params["_meta"] = meta.clone();
+        }
+        let result = rt.conn.request("session/load", params).await;
+        // Responses arrive after the notifications sent before them, so the
+        // replay is complete here.
+        let updates = self.captures.lock().unwrap().remove(&capture_key).unwrap_or_default();
+        let mut res = result.map_err(|e| HubError::with_auth(e, &rt))?;
+        let home = SessionHome { runtime_key: key, cwd: cwd.to_string(), launch: launch.clone(), mcp_servers, meta };
+        self.remember(agent_id, session_id, home, &rt);
+        self.remember_options(agent_id, &res);
+        res["updates"] = Value::Array(updates);
+        res["replayed"] = json!(true);
+        Ok(res)
+    }
+
+    /// Close a session and attach it again with different MCP servers and
+    /// `_meta` (switching between chat and agent mode). The agent keeps its context.
+    pub async fn reattach(&self, agent_id: &str, session_id: &str, mcp_servers: Value, meta: Value) -> Result<Value, HubError> {
+        let rt = self.session_runtime(agent_id, session_id).await?;
+        let home = self
+            .homes
+            .lock()
+            .unwrap()
+            .get(&(agent_id.to_string(), session_id.to_string()))
+            .cloned()
+            .ok_or_else(|| HubError::plain("연결되지 않은 대화예요"))?;
+        rt.conn.request("session/close", json!({ "sessionId": session_id })).await?;
+        rt.active_sessions.lock().unwrap().remove(session_id);
+        self.resume_session(agent_id, session_id, &home.cwd, &home.launch, mcp_servers, meta).await
+    }
+
+    /// Hold back a loading session's replay from the UI; true if captured.
+    fn capture(&self, agent_id: &str, session_id: &str, update: &Value) -> bool {
+        match self.captures.lock().unwrap().get_mut(&(agent_id.to_string(), session_id.to_string())) {
+            Some(buf) => {
+                buf.push(update.clone());
+                true
+            }
+            None => false,
+        }
     }
 
     /// The runtime hosting a session; restarts and resumes it if its process
@@ -346,7 +481,8 @@ impl Hub {
         match live {
             Some(rt) if rt.active_sessions.lock().unwrap().contains(session_id) => Ok(rt),
             _ => {
-                self.resume_session(agent_id, session_id, &home.cwd, &home.launch).await?;
+                self.resume_session(agent_id, session_id, &home.cwd, &home.launch, home.mcp_servers.clone(), home.meta.clone())
+                    .await?;
                 let rt = self.slot(&home.runtime_key).lock().await.clone();
                 rt.ok_or_else(|| HubError::plain("에이전트를 다시 시작하지 못했어요"))
             }
@@ -398,6 +534,36 @@ impl Hub {
     pub async fn call_session(&self, agent_id: &str, session_id: &str, method: &str, params: Value) -> Result<Value, HubError> {
         let rt = self.session_runtime(agent_id, session_id).await?;
         Ok(rt.conn.request(method, params).await?)
+    }
+
+    /// Keep the agent's latest option catalogue and persist it.
+    fn remember_options(&self, agent_id: &str, session: &Value) {
+        let Some(opts) = session.get("configOptions").filter(|o| o.as_array().is_some_and(|a| !a.is_empty())) else {
+            return;
+        };
+        let mut map = self.options.lock().unwrap();
+        if map.get(agent_id) == Some(opts) {
+            return;
+        }
+        map.insert(agent_id.to_string(), opts.clone());
+        if let Ok(text) = serde_json::to_vec_pretty(&*map) {
+            if let Some(dir) = self.options_file.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let _ = std::fs::write(&self.options_file, text);
+        }
+    }
+
+    pub fn agent_options(&self) -> HashMap<String, Value> {
+        self.options.lock().unwrap().clone()
+    }
+
+    pub fn store_quota(&self, agent_id: &str, profile_id: &str, info: Value) {
+        self.quotas.lock().unwrap().insert((agent_id.to_string(), profile_id.to_string()), info);
+    }
+
+    pub fn quota(&self, agent_id: &str, profile_id: &str) -> Option<Value> {
+        self.quotas.lock().unwrap().get(&(agent_id.to_string(), profile_id.to_string())).cloned()
     }
 
     pub fn respond_permission(&self, key: &str, option_id: Option<String>) -> Result<(), HubError> {
@@ -495,6 +661,16 @@ async fn pump_incoming(
     while let Some(msg) = incoming.recv().await {
         match msg {
             Incoming::Notification { method, params } if method == "session/update" => {
+                let update = params.get("update").cloned().unwrap_or(Value::Null);
+                if let Some(info) = update.pointer("/_meta/_claude~1rateLimit") {
+                    app.state::<Hub>().store_quota(&agent_id, &profile_id, info.clone());
+                }
+                if let Some(session_id) = params.get("sessionId").and_then(Value::as_str) {
+                    if app.state::<Hub>().capture(&agent_id, session_id, &update) {
+                        continue;
+                    }
+                    app.state::<crate::orchestra::Orchestra>().observe(&agent_id, session_id, &update);
+                }
                 let _ = app.emit(
                     "acp-update",
                     json!({
@@ -536,10 +712,12 @@ async fn pump_incoming(
             Incoming::Request { id, method, .. } => {
                 let _ = conn.respond(id, Err(RpcError::method_not_found(&method))).await;
             }
+            Incoming::Response { id, result } => conn.resolve(id, result).await,
             Incoming::Stderr(line) => {
                 let _ = app.emit("agent-log", json!({ "agentId": agent_id, "line": line }));
             }
             Incoming::Exited(code) => {
+                conn.fail_pending().await;
                 app.state::<Hub>().on_exit(&agent_id, &runtime_key, &conn, code).await;
                 break;
             }

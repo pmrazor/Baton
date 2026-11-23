@@ -15,6 +15,7 @@ import {
   Search,
   Terminal,
   Trash2,
+  Workflow,
   Wrench,
   type LucideIcon,
 } from "lucide-react";
@@ -125,6 +126,16 @@ export function ChatItemView({ item, isLast }: { item: ChatItem; isLast: boolean
       return <PlanView entries={item.entries} />;
     case "notice":
       return <div className={`notice notice-${item.tone}`}>{item.text}</div>;
+    case "brief":
+      return (
+        <div className="brief">
+          <div className="brief-head">
+            <Workflow size={14} />
+            {item.label}
+          </div>
+          <Md text={item.text} />
+        </div>
+      );
   }
 }
 

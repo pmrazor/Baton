@@ -33,6 +33,12 @@ interface Props {
   onSetConfig: (session: Session, configId: string, value: unknown) => void;
   onSetMode: (session: Session, modeId: string) => void;
   onDismissAuth: () => void;
+  agentMode: boolean;
+  teamId: string;
+  onChangeMode: (opts: { lead?: boolean; team?: string }) => void;
+  onOpenSession: (key: string) => void;
+  onMergeTask: (session: Session, taskId: string) => void;
+  onDiscardTask: (session: Session, taskId: string) => void;
 }
 
 export type Tab = "chat" | "activity" | "logs";
@@ -58,12 +64,22 @@ export function accountLabel(state: State, agentId: string, profileId: string) {
   return profile ? `${agent} · ${profile}` : agent;
 }
 
-export function TitleBar({ state, session, className = "" }: BarProps) {
+export function TitleBar({ state, session, className = "", onOpenSession }: BarProps & { onOpenSession?: (key: string) => void }) {
   const agentName = session ? accountLabel(state, session.agentId, profileOf(session.launch)) : null;
   const cwd = session?.cwd ?? state.workspace;
+  const parent = session?.parent ? state.sessions.find((s) => s.key === session.parent!.key) : undefined;
   return (
     <header className={`title-bar ${className}`} data-tauri-drag-region>
+      {parent && (
+        <>
+          <button className="crumb" onClick={() => onOpenSession?.(parent.key)}>
+            {parent.title}
+          </button>
+          <span className="crumb-sep">›</span>
+        </>
+      )}
       <span className="title-text">{session && !session.draft ? session.title : "새 대화"}</span>
+      {session?.lead && <span className="pill brand">에이전트 모드</span>}
       {agentName && <span className="pill">{agentName}</span>}
       {cwd && <span className="pill subtle">{baseName(cwd)}</span>}
     </header>
@@ -93,7 +109,7 @@ export default function ChatView(p: Props) {
 
   return (
     <main className="main">
-      {p.showTitle && <TitleBar state={state} session={session} />}
+      {p.showTitle && <TitleBar state={state} session={session} onOpenSession={p.onOpenSession} />}
       <TabBar session={session} tab={tab} onTab={p.onTab} />
 
       {state.authPrompt && <AuthBanner {...p} agentName={agentName(state.authPrompt.agentId)} />}
@@ -155,7 +171,19 @@ function ConversationView(p: Props & { agentName: (id: string) => string }) {
             </div>
           ) : (
             turns.map((turn, i) => (
-              <TurnView key={turn.key} turn={turn} running={busy && i === turns.length - 1} isLast={i === turns.length - 1} />
+              <TurnView
+                key={turn.key}
+                turn={turn}
+                running={busy && i === turns.length - 1}
+                isLast={i === turns.length - 1}
+                tasks={session?.tasks?.filter((t) => t.turnId === turn.user?.id)}
+                agents={state.agents}
+                permissions={state.permissions}
+                onOpen={p.onOpenSession}
+                onPermission={p.onPermission}
+                onMerge={(id) => session && p.onMergeTask(session, id)}
+                onDiscard={(id) => session && p.onDiscardTask(session, id)}
+              />
             ))
           )}
           {permissions.map((r) => (
@@ -189,6 +217,11 @@ function ConversationView(p: Props & { agentName: (id: string) => string }) {
         onCancel={() => session && p.onCancel(session)}
         onSetConfig={(id, v) => session && p.onSetConfig(session, id, v)}
         onSetMode={(id) => session && p.onSetMode(session, id)}
+        agentMode={session && !session.draft ? !!session.lead : p.agentMode}
+        teamId={session?.lead?.teamId ?? p.teamId}
+        teams={state.teams}
+        isTask={!!session?.parent}
+        onChangeMode={p.onChangeMode}
       />
     </>
   );

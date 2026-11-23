@@ -4,16 +4,22 @@ mod history;
 mod hub;
 mod legacy;
 mod login;
+mod orchestra;
 mod profiles;
 mod shell_env;
+mod teams;
+mod worktree;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde_json::{json, Value};
 use tauri::{Manager, State};
 
 use hub::{AgentInfo, Hub, HubError, Launch};
+use orchestra::Orchestra;
 use profiles::{Profile, Profiles, DEFAULT_PROFILE};
+use teams::{Team, Teams};
 
 #[tauri::command]
 async fn list_agents(hub: State<'_, Hub>) -> Result<Vec<AgentInfo>, HubError> {
@@ -33,7 +39,8 @@ async fn new_session(
     cwd: String,
     launch: Option<Launch>,
 ) -> Result<Value, HubError> {
-    hub.new_session(&agent_id, &cwd, &launch.unwrap_or_default()).await
+    hub.new_session(&agent_id, &cwd, &launch.unwrap_or_default(), json!([]), &Default::default(), Value::Null)
+        .await
 }
 
 /// Reattach a session the agent persisted earlier (after an app restart).
@@ -45,22 +52,202 @@ async fn resume_session(
     cwd: String,
     launch: Option<Launch>,
 ) -> Result<Value, HubError> {
-    hub.resume_session(&agent_id, &session_id, &cwd, &launch.unwrap_or_default()).await
+    hub.resume_session(&agent_id, &session_id, &cwd, &launch.unwrap_or_default(), json!([]), Value::Null)
+        .await
 }
 
 #[tauri::command]
 async fn send_prompt(
     hub: State<'_, Hub>,
+    orchestra: State<'_, Orchestra>,
     agent_id: String,
     session_id: String,
     text: String,
 ) -> Result<Value, HubError> {
+    let text = orchestra.lead_prompt(&agent_id, &session_id, &text);
     hub.prompt(&agent_id, &session_id, &text).await
 }
 
 #[tauri::command]
-async fn cancel_prompt(hub: State<'_, Hub>, agent_id: String, session_id: String) -> Result<(), HubError> {
+async fn cancel_prompt(
+    hub: State<'_, Hub>,
+    orchestra: State<'_, Orchestra>,
+    agent_id: String,
+    session_id: String,
+) -> Result<(), HubError> {
+    // Stopping a lead also stops the tasks it handed out.
+    orchestra.cancel_lead_tasks(&agent_id, &session_id).await;
     hub.cancel(&agent_id, &session_id).await
+}
+
+/// Agent mode: a lead session wired to Baton's MCP server and the given team.
+#[tauri::command]
+async fn new_lead_session(
+    hub: State<'_, Hub>,
+    orchestra: State<'_, Orchestra>,
+    agent_id: String,
+    cwd: String,
+    launch: Option<Launch>,
+    team_id: String,
+) -> Result<Value, HubError> {
+    let (token, mcp) = orchestra.register_lead(&agent_id, &cwd, &team_id, None);
+    let config = hub.def(&agent_id)?.lead_config.clone();
+    let meta = Orchestra::lead_meta(&agent_id);
+    match hub.new_session(&agent_id, &cwd, &launch.unwrap_or_default(), mcp, &config, meta).await {
+        Ok(session) => {
+            if let Some(id) = session.get("sessionId").and_then(Value::as_str) {
+                orchestra.bind_lead(&token, id);
+            }
+            Ok(session)
+        }
+        Err(e) => {
+            orchestra.forget_lead(&token);
+            Err(e)
+        }
+    }
+}
+
+#[tauri::command]
+async fn resume_lead_session(
+    hub: State<'_, Hub>,
+    orchestra: State<'_, Orchestra>,
+    agent_id: String,
+    session_id: String,
+    cwd: String,
+    launch: Option<Launch>,
+    team_id: String,
+) -> Result<Value, HubError> {
+    let (token, mcp) = orchestra.register_lead(&agent_id, &cwd, &team_id, Some(session_id.clone()));
+    let meta = Orchestra::lead_meta(&agent_id);
+    let res = hub.resume_session(&agent_id, &session_id, &cwd, &launch.unwrap_or_default(), mcp, meta).await;
+    if res.is_err() {
+        orchestra.forget_lead(&token);
+    }
+    res
+}
+
+/// Saved sessions of every agent (and account) for a folder, for importing.
+#[tauri::command]
+async fn list_agent_sessions(
+    hub: State<'_, Hub>,
+    profiles: State<'_, Arc<Profiles>>,
+    cwd: String,
+) -> Result<Vec<Value>, HubError> {
+    let mut out = Vec::new();
+    let agents: Vec<_> = hub.list().await.into_iter().map(|a| (a.id, a.multi_account)).collect();
+    for (agent_id, multi) in agents {
+        let mut accounts = vec![DEFAULT_PROFILE.to_string()];
+        if multi {
+            accounts.extend(profiles.list().into_iter().filter(|p| p.agent_id == agent_id).map(|p| p.id));
+        }
+        for profile_id in accounts {
+            let launch = Launch::from([(profiles::PROFILE_KEY.to_string(), profile_id.clone())]);
+            // One agent failing (not installed, logged out) shouldn't hide the others.
+            match hub.list_sessions(&agent_id, &cwd, &launch).await {
+                Ok(sessions) => out.extend(sessions.into_iter().map(|mut s| {
+                    s["agentId"] = json!(agent_id);
+                    s["profileId"] = json!(profile_id);
+                    s
+                })),
+                Err(e) => eprintln!("session/list {agent_id}/{profile_id}: {}", e.message),
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Bring a saved session into the app, as a chat or (with `team_id`) as a lead.
+#[tauri::command]
+async fn import_session(
+    hub: State<'_, Hub>,
+    orchestra: State<'_, Orchestra>,
+    agent_id: String,
+    session_id: String,
+    cwd: String,
+    launch: Option<Launch>,
+    team_id: Option<String>,
+) -> Result<Value, HubError> {
+    let (token, mcp, meta) = match &team_id {
+        Some(team) => {
+            let (token, mcp) = orchestra.register_lead(&agent_id, &cwd, team, Some(session_id.clone()));
+            (Some(token), mcp, Orchestra::lead_meta(&agent_id))
+        }
+        None => (None, json!([]), Value::Null),
+    };
+    let res = hub.load_session(&agent_id, &session_id, &cwd, &launch.unwrap_or_default(), mcp, meta).await;
+    if let (Err(_), Some(token)) = (&res, &token) {
+        orchestra.forget_lead(token);
+    }
+    res
+}
+
+/// Switch a running conversation between chat (`team_id` = null) and agent mode.
+#[tauri::command]
+async fn switch_mode(
+    hub: State<'_, Hub>,
+    orchestra: State<'_, Orchestra>,
+    agent_id: String,
+    session_id: String,
+    cwd: String,
+    team_id: Option<String>,
+) -> Result<Value, HubError> {
+    orchestra.forget_session(&agent_id, &session_id);
+    match team_id {
+        Some(team) => {
+            let (token, mcp) = orchestra.register_lead(&agent_id, &cwd, &team, Some(session_id.clone()));
+            let res = hub.reattach(&agent_id, &session_id, mcp, Orchestra::lead_meta(&agent_id)).await;
+            if res.is_err() {
+                orchestra.forget_lead(&token);
+            }
+            res
+        }
+        None => hub.reattach(&agent_id, &session_id, json!([]), Value::Null).await,
+    }
+}
+
+/// Merge a finished worktree task into the workspace (the user's button).
+#[tauri::command]
+async fn merge_task(orchestra: State<'_, Orchestra>, task_id: String) -> Result<Value, HubError> {
+    orchestra.merge(&task_id).await.map_err(plain_error)
+}
+
+/// Throw away a worktree task's changes.
+#[tauri::command]
+async fn discard_task(orchestra: State<'_, Orchestra>, task_id: String) -> Result<Value, HubError> {
+    orchestra.discard(&task_id).await.map_err(plain_error)
+}
+
+/// Change the team of a running lead conversation.
+#[tauri::command]
+fn set_lead_team(orchestra: State<'_, Orchestra>, agent_id: String, session_id: String, team_id: String) {
+    orchestra.set_team(&agent_id, &session_id, &team_id);
+}
+
+/// The user wrote in a task's own chat; the lead sees it with the task's result.
+#[tauri::command]
+fn task_note(orchestra: State<'_, Orchestra>, task_id: String, text: String) {
+    orchestra.add_note(&task_id, &text);
+}
+
+/// Each agent's last reported config options (models, modes, effort).
+#[tauri::command]
+fn agent_options(hub: State<'_, Hub>) -> HashMap<String, Value> {
+    hub.agent_options()
+}
+
+#[tauri::command]
+fn list_teams(teams: State<'_, Teams>) -> Vec<Team> {
+    teams.all()
+}
+
+#[tauri::command]
+fn save_team(teams: State<'_, Teams>, team: Team) -> Result<Team, HubError> {
+    teams.save_team(team).map_err(plain_error)
+}
+
+#[tauri::command]
+fn delete_team(teams: State<'_, Teams>, id: String) -> Result<(), HubError> {
+    teams.delete(&id).map_err(plain_error)
 }
 
 #[tauri::command]
@@ -188,8 +375,18 @@ pub fn run() {
                 agents::default_agents()
             });
             let profiles = Arc::new(Profiles::load(&dir, &app.path().app_data_dir()?));
-            app.manage(Hub::new(app.handle().clone(), defs, profiles.clone()));
+            let options_file = dir.join("agent-options.json");
+            app.manage(Hub::new(app.handle().clone(), defs, profiles.clone(), options_file));
             app.manage(profiles);
+            app.manage(Teams::load(&dir));
+            app.manage(Orchestra::start(app.handle().clone())?);
+            // Dev aid: BATON_DEBUG_LEAD=<workspace> registers a lead with no
+            // chat behind it and prints its MCP endpoint, for testing tools by hand.
+            if let Ok(cwd) = std::env::var("BATON_DEBUG_LEAD") {
+                let orchestra = app.state::<Orchestra>();
+                let (token, mcp) = orchestra.register_lead("claude", &cwd, teams::AUTO_TEAM, Some("debug-lead".into()));
+                eprintln!("BATON_DEBUG_LEAD token={token} mcp={mcp}");
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -197,6 +394,19 @@ pub fn run() {
             agents_config_path,
             new_session,
             resume_session,
+            new_lead_session,
+            resume_lead_session,
+            task_note,
+            set_lead_team,
+            list_agent_sessions,
+            import_session,
+            switch_mode,
+            merge_task,
+            discard_task,
+            agent_options,
+            list_teams,
+            save_team,
+            delete_team,
             send_prompt,
             cancel_prompt,
             respond_permission,

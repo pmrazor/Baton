@@ -11,10 +11,13 @@ import type {
   Profile,
   Session,
   SessionModes,
+  TaskInfo,
+  Team,
   ToolCallFields,
   TurnStats,
 } from "./types";
-import { accountKey, sessionKey } from "./types";
+import { accountKey, isTaskActive, sessionKey } from "./types";
+import type { TaskSessionEvent } from "./api";
 import { quotasFromUpdate } from "./usage";
 
 export interface AuthPrompt {
@@ -41,6 +44,7 @@ export interface State {
   /** Logged-in identity per account, keyed by accountKey(agent, profile). */
   identities: Record<string, AuthStatus>;
   profiles: Profile[];
+  teams: Team[];
 }
 
 export const initialState: State = {
@@ -56,6 +60,7 @@ export const initialState: State = {
   accountUsage: {},
   identities: {},
   profiles: [],
+  teams: [],
 };
 
 export type Action =
@@ -75,6 +80,7 @@ export type Action =
       launch: Launch;
       configOptions: ConfigOption[];
       modes: SessionModes | null;
+      lead?: { teamId: string };
     }
   | { type: "activate"; key: string | null }
   | { type: "restore"; sessions: Session[]; activeKey: string | null }
@@ -88,6 +94,26 @@ export type Action =
   | { type: "update"; agentId: string; profileId: string; sessionId: string; update: any }
   | { type: "auth"; agentId: string; profileId: string; status: AuthStatus | null }
   | { type: "profiles"; profiles: Profile[] }
+  | { type: "teams"; teams: Team[] }
+  | { type: "leadTeam"; key: string; teamId: string }
+  | {
+      type: "importSession";
+      agentId: string;
+      sessionId: string;
+      cwd: string;
+      launch: Launch;
+      title: string;
+      updatedAt: number;
+      updates: unknown[];
+      replayed: boolean;
+      configOptions: ConfigOption[];
+      modes: SessionModes | null;
+      lead?: { teamId: string };
+    }
+  | { type: "modeSwitched"; key: string; lead?: { teamId: string }; configOptions?: ConfigOption[] | null; note: string }
+  | { type: "taskUpdate"; task: TaskInfo }
+  | { type: "taskSession"; event: TaskSessionEvent }
+  | { type: "taskBrief"; task: TaskInfo; text: string }
   | { type: "configOptions"; key: string; configOptions: ConfigOption[] }
   | { type: "mode"; key: string; modeId: string }
   | { type: "permissionAdd"; request: PermissionRequest }
@@ -152,6 +178,8 @@ export function reducer(state: State, action: Action): State {
         draft: true,
         attached: true,
         launch: action.launch,
+        lead: action.lead,
+        tasks: action.lead ? [] : undefined,
         usage: null,
         lastTurn: null,
       };
@@ -257,6 +285,93 @@ export function reducer(state: State, action: Action): State {
     }
     case "profiles":
       return { ...state, profiles: action.profiles };
+    case "teams":
+      return { ...state, teams: action.teams };
+    case "importSession": {
+      const key = sessionKey(action.agentId, action.sessionId);
+      if (state.sessions.some((s) => s.key === key)) return state;
+      let session: Session = {
+        key,
+        agentId: action.agentId,
+        sessionId: action.sessionId,
+        cwd: action.cwd,
+        title: action.title,
+        items: [],
+        busy: false,
+        configOptions: action.configOptions,
+        modes: action.modes,
+        createdAt: action.updatedAt,
+        updatedAt: action.updatedAt,
+        draft: false,
+        attached: true,
+        launch: action.launch,
+        lead: action.lead,
+        tasks: action.lead ? [] : undefined,
+        usage: null,
+        lastTurn: null,
+      };
+      for (const u of action.updates) session = applyUpdate(session, u, true);
+      session = { ...session, items: cleanReplay(session.items) };
+      if (!action.replayed) {
+        session.items.push({
+          kind: "notice",
+          id: nextId(),
+          tone: "info",
+          text: "이 에이전트는 지난 대화 내용을 다시 보내 주지 않아 화면에는 없지만, 에이전트는 기억하고 있어요.",
+        });
+      }
+      return { ...state, sessions: [...state.sessions, session] };
+    }
+    case "modeSwitched":
+      return mapSession(state, action.key, (s) => ({
+        ...s,
+        lead: action.lead,
+        tasks: action.lead ? (s.tasks ?? []) : s.tasks,
+        configOptions: action.configOptions?.length ? action.configOptions : s.configOptions,
+        items: [...s.items, { kind: "notice", id: nextId(), text: action.note, tone: "info" }],
+      }));
+    case "leadTeam":
+      return mapSession(state, action.key, (s) => (s.lead ? { ...s, lead: { teamId: action.teamId } } : s));
+    case "taskUpdate":
+      return applyTask(state, action.task);
+    case "taskSession": {
+      const { task, session, brief } = action.event;
+      const key = sessionKey(session.agentId, session.sessionId);
+      if (state.sessions.some((s) => s.key === key)) return applyTask(state, task);
+      const now = Date.now();
+      const sub: Session = {
+        key,
+        agentId: session.agentId,
+        sessionId: session.sessionId,
+        cwd: session.cwd,
+        title: task.title,
+        items: [{ kind: "brief", id: nextId(), text: brief, label: "총괄이 맡긴 작업", startedAt: now }],
+        busy: false,
+        configOptions: session.configOptions ?? [],
+        modes: session.modes ?? null,
+        createdAt: now,
+        updatedAt: now,
+        draft: false,
+        attached: true,
+        launch: session.launch ?? {},
+        parent: { key: sessionKey(task.leadAgentId, task.leadSessionId), taskId: task.id },
+        usage: null,
+        lastTurn: null,
+      };
+      return applyTask({ ...state, sessions: [...state.sessions, sub] }, task);
+    }
+    case "taskBrief": {
+      if (!action.task.sessionId) return state;
+      const key = sessionKey(action.task.agentId, action.task.sessionId);
+      return mapSession(state, key, (s) => ({
+        ...s,
+        updatedAt: Date.now(),
+        items: [
+          ...s.items,
+          { kind: "brief", id: nextId(), text: action.text, label: "총괄의 추가 지시", startedAt: Date.now() },
+        ],
+      }));
+    }
     case "configOptions":
       return mapSession(state, action.key, (s) => ({ ...s, configOptions: action.configOptions }));
     case "mode":
@@ -272,11 +387,39 @@ export function reducer(state: State, action: Action): State {
   }
 }
 
-/** When a turn ends, record how long it took on the user message that started it. */
+/** Record a task's status on its lead, and mirror it on the task's own chat. */
+function applyTask(state: State, task: TaskInfo): State {
+  const leadKey = sessionKey(task.leadAgentId, task.leadSessionId);
+  let next = mapSession(state, leadKey, (lead) => {
+    const tasks = lead.tasks ?? [];
+    const prev = tasks.find((t) => t.id === task.id);
+    // A task belongs to the lead turn that was running when it first appeared.
+    const turnId = prev?.turnId ?? lead.items.filter((i) => i.kind === "user").at(-1)?.id;
+    const merged = { ...task, turnId };
+    return {
+      ...lead,
+      tasks: prev ? tasks.map((t) => (t.id === task.id ? merged : t)) : [...tasks, merged],
+    };
+  });
+  if (task.sessionId) {
+    const running = task.status === "running";
+    const finished = !isTaskActive(task.status);
+    next = mapSession(next, sessionKey(task.agentId, task.sessionId), (s) => ({
+      ...s,
+      busy: running,
+      updatedAt: Date.now(),
+      items: finished ? stampTurnDuration(s.items) : s.items,
+    }));
+  }
+  return next;
+}
+
+/** When a turn ends, record how long it took on the message that started it. */
 function stampTurnDuration(items: ChatItem[]): ChatItem[] {
-  const idx = items.map((i) => i.kind).lastIndexOf("user");
+  const idx = items.findLastIndex((i) => i.kind === "user" || i.kind === "brief");
   const user = items[idx];
-  if (!user || user.kind !== "user" || !user.startedAt || user.durationMs !== undefined) return items;
+  if (!user || (user.kind !== "user" && user.kind !== "brief") || !user.startedAt || user.durationMs !== undefined)
+    return items;
   const stamped = { ...user, durationMs: Date.now() - user.startedAt };
   return items.map((it, i) => (i === idx ? stamped : it));
 }
@@ -319,9 +462,40 @@ function upsertTool(items: ChatItem[], u: Partial<ToolCallFields> & { toolCallId
   return items.map((it, i) => (i === idx ? ({ ...it, ...patch } as ToolItem) : it));
 }
 
-function applyUpdate(s: Session, u: any): Session {
+/**
+ * Strip the notes Baton itself put in front of messages it sent (agent-mode
+ * note, task preamble), which come back when a conversation is replayed.
+ */
+function cleanReplay(items: ChatItem[]): ChatItem[] {
+  return items.map((it) => {
+    if (it.kind !== "user") return it;
+    let text = it.text;
+    if (text.startsWith("[Baton agent mode")) {
+      const i = text.indexOf("[User message]\n");
+      if (i >= 0) text = text.slice(i + "[User message]\n".length);
+    } else if (text.startsWith("[Baton] A lead agent")) {
+      const i = text.indexOf("\n\n");
+      if (i >= 0) text = text.slice(i + 2);
+    }
+    return text === it.text ? it : { ...it, text };
+  });
+}
+
+/** `replay`: the update comes from a loaded conversation, so user messages count. */
+function applyUpdate(s: Session, u: any, replay = false): Session {
   if (!u || typeof u !== "object") return s;
   switch (u.sessionUpdate) {
+    case "user_message_chunk": {
+      // Live turns already show the user's message; only a replay needs it.
+      if (!replay) return s;
+      const c = u.content ?? {};
+      const text = c.type === "text" ? (c.text ?? "") : `[${c.type ?? "content"}]`;
+      const last = s.items.at(-1);
+      if (last && last.kind === "user") {
+        return { ...s, items: [...s.items.slice(0, -1), { ...last, text: last.text + text }] };
+      }
+      return { ...s, items: [...s.items, { kind: "user", id: nextId(), text }] };
+    }
     case "agent_message_chunk":
     case "agent_thought_chunk": {
       const kind = u.sessionUpdate === "agent_message_chunk" ? "assistant" : "thought";
@@ -334,7 +508,7 @@ function applyUpdate(s: Session, u: any): Session {
       return { ...s, items: upsertTool(s.items, u) };
     case "plan": {
       // One live plan per turn: replace the plan since the last user message.
-      const lastUser = s.items.map((i) => i.kind).lastIndexOf("user");
+      const lastUser = s.items.findLastIndex((i) => i.kind === "user" || i.kind === "brief");
       const idx = s.items.findIndex((i, n) => n > lastUser && i.kind === "plan");
       const plan: ChatItem = { kind: "plan", id: idx >= 0 ? s.items[idx].id : nextId(), entries: u.entries ?? [] };
       const items = idx >= 0 ? s.items.map((it, n) => (n === idx ? plan : it)) : [...s.items, plan];

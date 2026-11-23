@@ -2,10 +2,11 @@ import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { ask, open } from "@tauri-apps/plugin-dialog";
 import { api, subscribe, toHubError } from "./api";
 import { initialState, reducer, type State } from "./store";
-import { profileOf, sessionKey, type Launch, type Session } from "./types";
+import { AUTO_TEAM, isTaskActive, profileOf, sessionKey, type Launch, type Session } from "./types";
 import Sidebar from "./components/Sidebar";
 import ChatView, { TitleBar, type Tab } from "./components/ChatView";
 import SettingsModal from "./components/SettingsModal";
+import ImportModal, { type Imported } from "./components/ImportModal";
 
 // Per-user conveniences only; losing them just resets the sidebar.
 const STORE = {
@@ -15,6 +16,8 @@ const STORE = {
   rail: "baton.sidebarRail",
   active: "baton.activeSession",
   launch: "baton.launch",
+  agentMode: "baton.agentMode",
+  team: "baton.team",
 };
 
 /** What goes to disk: everything except live-process state. */
@@ -34,6 +37,17 @@ function fromSaved(v: any): Session | null {
     createdAt: Date.now(),
     launch: {},
     ...v,
+    // Tasks can't outlive the app: anything unfinished was interrupted.
+    tasks: Array.isArray(v.tasks)
+      ? v.tasks.map((t: any) =>
+          isTaskActive(t.status)
+            ? { ...t, status: "cancelled" }
+            : t.mergeState === "pending"
+              ? // The worktree outlives the app but the app no longer tracks it.
+                { ...t, status: "failed", mergeState: null, error: "앱을 다시 시작해서 이 작업은 병합할 수 없어요" }
+              : t,
+        )
+      : v.tasks,
     updatedAt: v.updatedAt ?? v.createdAt ?? Date.now(),
     busy: false,
     draft: false,
@@ -71,7 +85,10 @@ export default function App() {
   const [connecting, setConnecting] = useState<string | null>(null);
   const [rail, setRail] = useState(() => read<boolean>(STORE.rail, false));
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [importCwd, setImportCwd] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("chat");
+  const [agentMode, setAgentMode] = useState(() => read<boolean>(STORE.agentMode, false));
+  const [teamId, setTeamId] = useState(() => read<string>(STORE.team, AUTO_TEAM));
   const [historyLoaded, setHistoryLoaded] = useState(false);
   const creating = useRef(false);
   const attaching = useRef<string | null>(null);
@@ -80,6 +97,7 @@ export default function App() {
   useEffect(() => {
     api.listAgents().then((agents) => dispatch({ type: "agents", agents }));
     api.listProfiles().then((profiles) => dispatch({ type: "profiles", profiles }));
+    api.listTeams().then((teams) => dispatch({ type: "teams", teams }));
 
     api
       .loadSessions()
@@ -104,6 +122,9 @@ export default function App() {
         api.listAgents().then((agents) => dispatch({ type: "agents", agents }));
       },
       onLog: (agentId, line) => dispatch({ type: "log", agentId, line }),
+      onTask: (task) => dispatch({ type: "taskUpdate", task }),
+      onTaskSession: (event) => dispatch({ type: "taskSession", event }),
+      onTaskBrief: (task, text) => dispatch({ type: "taskBrief", task, text }),
     }).then((off) => (disposed ? off() : (unlisten = off)));
 
     return () => {
@@ -115,6 +136,8 @@ export default function App() {
   useEffect(() => write(STORE.workspaces, state.workspaces), [state.workspaces]);
   useEffect(() => write(STORE.workspace, state.workspace), [state.workspace]);
   useEffect(() => write(STORE.rail, rail), [rail]);
+  useEffect(() => write(STORE.agentMode, agentMode), [agentMode]);
+  useEffect(() => write(STORE.team, teamId), [teamId]);
   useEffect(() => {
     if (historyLoaded) write(STORE.active, state.activeKey);
   }, [state.activeKey, historyLoaded]);
@@ -137,9 +160,14 @@ export default function App() {
     if (typeof dir === "string") dispatch({ type: "workspaceAdd", path: dir });
   }, []);
 
-  /** Open a draft chat right away so the model can be picked before the first message. */
+  /**
+   * Open a draft chat right away so the model can be picked before the first message.
+   * In agent mode the draft is a lead session wired to the chosen team.
+   */
   const newChat = useCallback(
-    async (workspace?: string, agentId?: string, launchOverride?: Launch) => {
+    async (workspace?: string, agentId?: string, launchOverride?: Launch, opts?: { lead?: boolean; team?: string }) => {
+      const lead = opts?.lead ?? agentMode;
+      const team = opts?.team ?? teamId;
       const ws = workspace ?? state.workspace;
       if (!ws) return addWorkspace();
       const agent = agentId ?? read<string | null>(STORE.agent, null) ?? state.agents[0]?.id;
@@ -152,7 +180,7 @@ export default function App() {
       dispatch({ type: "dropDrafts" });
       dispatch({ type: "workspaceSelect", path: ws });
       try {
-        const res = await api.newSession(agent, ws, launch);
+        const res = lead ? await api.newLeadSession(agent, ws, launch, team) : await api.newSession(agent, ws, launch);
         write(STORE.agent, agent);
         write(`${STORE.launch}.${agent}`, launch);
         dispatch({
@@ -164,6 +192,7 @@ export default function App() {
           launch,
           configOptions: res.configOptions ?? [],
           modes: res.modes ?? null,
+          lead: lead ? { teamId: team } : undefined,
         });
       } catch (e) {
         const err = toHubError(e);
@@ -181,8 +210,66 @@ export default function App() {
         setConnecting(null);
       }
     },
-    [state.workspace, state.agents, addWorkspace],
+    [state.workspace, state.agents, addWorkspace, agentMode, teamId],
   );
+
+  /** Switch chat/agent mode or team; an unused draft is recreated to match. */
+  const changeMode = useCallback(
+    (opts: { lead?: boolean; team?: string }) => {
+      if (opts.lead !== undefined) setAgentMode(opts.lead);
+      if (opts.team !== undefined) setTeamId(opts.team);
+      const current = state.sessions.find((s) => s.key === state.activeKey);
+      // A running conversation is reattached with or without Baton's tools; the agent keeps its context.
+      if (current && !current.draft && opts.lead !== undefined && opts.lead !== !!current.lead) {
+        const team = opts.lead ? (opts.team ?? teamId) : null;
+        const teamName = state.teams.find((t) => t.id === team)?.name ?? "자동";
+        dispatch({ type: "busy", key: current.key, busy: true });
+        api
+          .switchMode(current.agentId, current.sessionId, current.cwd, team)
+          .then((res) =>
+            dispatch({
+              type: "modeSwitched",
+              key: current.key,
+              lead: team ? { teamId: team } : undefined,
+              configOptions: res.configOptions,
+              note: team ? `에이전트 모드로 전환했어요 · 팀: ${teamName}` : "채팅 모드로 전환했어요",
+            }),
+          )
+          .catch((e) => dispatch({ type: "notice", key: current.key, text: toHubError(e).message, tone: "error" }))
+          .finally(() => dispatch({ type: "busy", key: current.key, busy: false }));
+        return;
+      }
+      // A running lead switches team in place; its next delegations use the new roster.
+      if (current && !current.draft && current.lead && opts.team !== undefined) {
+        dispatch({ type: "leadTeam", key: current.key, teamId: opts.team });
+        api.setLeadTeam(current.agentId, current.sessionId, opts.team).catch(() => {});
+        return;
+      }
+      if (current?.draft) newChat(current.cwd, current.agentId, current.launch, opts);
+    },
+    [state.sessions, state.activeKey, state.teams, teamId, newChat],
+  );
+
+  const onImported = useCallback((items: Imported[]) => {
+    for (const it of items) {
+      dispatch({
+        type: "importSession",
+        agentId: it.info.agentId,
+        sessionId: it.info.sessionId,
+        cwd: it.info.cwd,
+        launch: { profile: it.info.profileId },
+        title: it.title,
+        updatedAt: it.updatedAt,
+        updates: it.result.updates,
+        replayed: it.result.replayed,
+        configOptions: it.result.configOptions ?? [],
+        modes: it.result.modes ?? null,
+        lead: it.teamId ? { teamId: it.teamId } : undefined,
+      });
+    }
+    const first = items[0];
+    if (first) dispatch({ type: "activate", key: sessionKey(first.info.agentId, first.info.sessionId) });
+  }, []);
 
   const setConfig = useCallback(async (session: Session, configId: string, value: unknown) => {
     try {
@@ -211,7 +298,9 @@ export default function App() {
     attaching.current = s.key;
     (async () => {
       try {
-        const res = await api.resumeSession(s.agentId, s.sessionId, s.cwd, s.launch);
+        const res = s.lead
+          ? await api.resumeLeadSession(s.agentId, s.sessionId, s.cwd, s.launch, s.lead.teamId)
+          : await api.resumeSession(s.agentId, s.sessionId, s.cwd, s.launch);
         const live = res.configOptions ?? [];
         dispatch({ type: "attached", key: s.key, configOptions: live, modes: res.modes ?? null });
         // Re-apply the model/effort/mode the user had picked.
@@ -246,17 +335,29 @@ export default function App() {
     })();
   }, [active, setConfig]);
 
-  const deleteSession = useCallback(async (key: string) => {
-    const ok = await ask("이 대화를 삭제할까요? 되돌릴 수 없어요.", { title: "대화 삭제", kind: "warning" });
-    if (!ok) return;
-    dispatch({ type: "closeSession", key });
-    saved.current.delete(key);
-    api.deleteSession(key).catch((e) => console.error("대화 삭제 실패", e));
-  }, []);
+  const deleteSession = useCallback(
+    async (key: string) => {
+      // A lead's task chats go with it.
+      const children = state.sessions.filter((s) => s.parent?.key === key).map((s) => s.key);
+      const message = children.length
+        ? `이 대화와 하위 작업 ${children.length}개를 삭제할까요? 되돌릴 수 없어요.`
+        : "이 대화를 삭제할까요? 되돌릴 수 없어요.";
+      const ok = await ask(message, { title: "대화 삭제", kind: "warning" });
+      if (!ok) return;
+      for (const k of [key, ...children]) {
+        dispatch({ type: "closeSession", key: k });
+        saved.current.delete(k);
+        api.deleteSession(k).catch((e) => console.error("대화 삭제 실패", e));
+      }
+    },
+    [state.sessions],
+  );
 
   const sendPrompt = useCallback(async (session: Session, text: string) => {
     const { key, agentId, sessionId } = session;
     const profileId = profileOf(session.launch);
+    // A message typed into a delegated task also reaches its lead.
+    if (session.parent) api.taskNote(session.parent.taskId, text).catch(() => {});
     dispatch({ type: "userMessage", key, text });
     dispatch({ type: "busy", key, busy: true });
     const started = performance.now();
@@ -320,7 +421,14 @@ export default function App() {
 
   return (
     <div className={`app ${rail ? "rail-mode" : ""}`}>
-      {rail && <TitleBar className="full" state={state} session={active} />}
+      {rail && (
+        <TitleBar
+          className="full"
+          state={state}
+          session={active}
+          onOpenSession={(key) => dispatch({ type: "activate", key })}
+        />
+      )}
       <Sidebar
         agents={state.agents}
         workspaces={state.workspaces}
@@ -332,6 +440,7 @@ export default function App() {
         onAddWorkspace={addWorkspace}
         onSelectWorkspace={(path) => dispatch({ type: "workspaceSelect", path })}
         onRemoveWorkspace={(path) => dispatch({ type: "workspaceRemove", path })}
+        onImport={setImportCwd}
         onActivate={(key) => dispatch({ type: "activate", key })}
         onCloseSession={deleteSession}
         rail={rail}
@@ -353,11 +462,45 @@ export default function App() {
         onSetConfig={setConfig}
         onSetMode={setMode}
         onDismissAuth={() => dispatch({ type: "authPrompt", prompt: null })}
+        agentMode={agentMode}
+        teamId={teamId}
+        onChangeMode={changeMode}
+        onOpenSession={(key) => dispatch({ type: "activate", key })}
+        onMergeTask={(session, taskId) =>
+          api
+            .mergeTask(taskId)
+            .then((r) =>
+              dispatch({
+                type: "notice",
+                key: session.key,
+                tone: r.conflicts.length ? "error" : "info",
+                text: r.conflicts.length
+                  ? `병합했지만 충돌이 있어요: ${r.conflicts.join(", ")}`
+                  : `${r.merged_files.length}개 파일을 워크스페이스에 병합했어요`,
+              }),
+            )
+            .catch((e) => dispatch({ type: "notice", key: session.key, text: toHubError(e).message, tone: "error" }))
+        }
+        onDiscardTask={(session, taskId) =>
+          api
+            .discardTask(taskId)
+            .catch((e) => dispatch({ type: "notice", key: session.key, text: toHubError(e).message, tone: "error" }))
+        }
       />
+      {importCwd && (
+        <ImportModal
+          state={state}
+          cwd={importCwd}
+          defaultTeam={teamId}
+          onImported={onImported}
+          onClose={() => setImportCwd(null)}
+        />
+      )}
       {settingsOpen && (
         <SettingsModal
           state={state}
           onProfilesChanged={() => api.listProfiles().then((profiles) => dispatch({ type: "profiles", profiles }))}
+          onTeamsChanged={() => api.listTeams().then((teams) => dispatch({ type: "teams", teams }))}
           onClose={() => setSettingsOpen(false)}
         />
       )}

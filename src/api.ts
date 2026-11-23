@@ -10,7 +10,27 @@ import type {
   PermissionRequest,
   Profile,
   SessionModes,
+  TaskInfo,
+  Team,
 } from "./types";
+
+/** A session an agent has saved for a folder (ACP `session/list`). */
+export interface AgentSessionInfo {
+  agentId: string;
+  profileId: string;
+  sessionId: string;
+  cwd: string;
+  title?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface ImportResult {
+  /** Replayed `session/update`s, when the agent can replay. */
+  updates: unknown[];
+  replayed: boolean;
+  configOptions?: ConfigOption[] | null;
+  modes?: SessionModes | null;
+}
 
 export interface NewSessionResult {
   sessionId: string;
@@ -23,6 +43,25 @@ export const api = {
   agentsConfigPath: () => invoke<string>("agents_config_path"),
   newSession: (agentId: string, cwd: string, launch: Launch) =>
     invoke<NewSessionResult>("new_session", { agentId, cwd, launch }),
+  newLeadSession: (agentId: string, cwd: string, launch: Launch, teamId: string) =>
+    invoke<NewSessionResult>("new_lead_session", { agentId, cwd, launch, teamId }),
+  resumeLeadSession: (agentId: string, sessionId: string, cwd: string, launch: Launch, teamId: string) =>
+    invoke<Omit<NewSessionResult, "sessionId">>("resume_lead_session", { agentId, sessionId, cwd, launch, teamId }),
+  taskNote: (taskId: string, text: string) => invoke<void>("task_note", { taskId, text }),
+  listAgentSessions: (cwd: string) => invoke<AgentSessionInfo[]>("list_agent_sessions", { cwd }),
+  importSession: (agentId: string, sessionId: string, cwd: string, launch: Launch, teamId: string | null) =>
+    invoke<ImportResult>("import_session", { agentId, sessionId, cwd, launch, teamId }),
+  switchMode: (agentId: string, sessionId: string, cwd: string, teamId: string | null) =>
+    invoke<Omit<NewSessionResult, "sessionId">>("switch_mode", { agentId, sessionId, cwd, teamId }),
+  mergeTask: (taskId: string) =>
+    invoke<{ merged_files: string[]; conflicts: string[] }>("merge_task", { taskId }),
+  discardTask: (taskId: string) => invoke<void>("discard_task", { taskId }),
+  setLeadTeam: (agentId: string, sessionId: string, teamId: string) =>
+    invoke<void>("set_lead_team", { agentId, sessionId, teamId }),
+  listTeams: () => invoke<Team[]>("list_teams"),
+  agentOptions: () => invoke<Record<string, ConfigOption[]>>("agent_options"),
+  saveTeam: (team: Team) => invoke<Team>("save_team", { team }),
+  deleteTeam: (id: string) => invoke<void>("delete_team", { id }),
   resumeSession: (agentId: string, sessionId: string, cwd: string, launch: Launch) =>
     invoke<Omit<NewSessionResult, "sessionId">>("resume_session", { agentId, sessionId, cwd, launch }),
   saveSession: (key: string, data: unknown) => invoke<void>("save_session", { key, data }),
@@ -63,6 +102,22 @@ export interface HubEvents {
   onPermission: (req: PermissionRequest) => void;
   onStatus: (agentId: string, status: AgentStatus, message: string | null) => void;
   onLog: (agentId: string, line: string) => void;
+  onTask: (task: TaskInfo) => void;
+  onTaskSession: (e: TaskSessionEvent) => void;
+  onTaskBrief: (task: TaskInfo, text: string) => void;
+}
+
+export interface TaskSessionEvent {
+  task: TaskInfo;
+  session: {
+    agentId: string;
+    sessionId: string;
+    cwd: string;
+    launch: Launch;
+    configOptions: ConfigOption[] | null;
+    modes: SessionModes | null;
+  };
+  brief: string;
 }
 
 export async function subscribe(h: HubEvents): Promise<UnlistenFn> {
@@ -78,6 +133,9 @@ export async function subscribe(h: HubEvents): Promise<UnlistenFn> {
       h.onStatus(e.payload.agentId, e.payload.status, e.payload.message),
     ),
     listen<{ agentId: string; line: string }>("agent-log", (e) => h.onLog(e.payload.agentId, e.payload.line)),
+    listen<TaskInfo>("task-update", (e) => h.onTask(e.payload)),
+    listen<TaskSessionEvent>("task-session", (e) => h.onTaskSession(e.payload)),
+    listen<{ task: TaskInfo; text: string }>("task-brief", (e) => h.onTaskBrief(e.payload.task, e.payload.text)),
   ]);
   return () => offs.forEach((off) => off());
 }

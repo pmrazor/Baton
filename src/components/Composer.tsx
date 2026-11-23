@@ -1,5 +1,5 @@
 import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { ArrowUp, Bot, ChevronDown, ShieldCheck, SlidersHorizontal, Square } from "lucide-react";
+import { ArrowUp, Bot, ChevronDown, ShieldCheck, SlidersHorizontal, Square, Users } from "lucide-react";
 import {
   DEFAULT_PROFILE,
   type AccountUsage,
@@ -10,6 +10,7 @@ import {
   type Profile,
   type SelectOption,
   type Session,
+  type Team,
 } from "../types";
 import { MenuItem, MenuSection, Popover } from "./Popover";
 import UsageButton from "./UsagePanel";
@@ -33,6 +34,13 @@ interface Props {
   onCancel: () => void;
   onSetConfig: (configId: string, value: unknown) => void;
   onSetMode: (modeId: string) => void;
+  /** Agent mode: this chat is (or the next draft will be) a lead. */
+  agentMode: boolean;
+  teamId: string;
+  teams: Team[];
+  /** This chat is a task delegated by a lead. */
+  isTask: boolean;
+  onChangeMode: (opts: { lead?: boolean; team?: string }) => void;
 }
 
 type Group = { group?: string; name: string; options: SelectOption[] };
@@ -87,12 +95,41 @@ export default function Composer(p: Props) {
 
   return (
     <div className="composer-wrap">
+      {!p.isTask && (
+        <div className="mode-switch" role="group" aria-label="모드">
+          {(
+            [
+              [false, "채팅"],
+              [true, "에이전트"],
+            ] as const
+          ).map(([lead, label]) => (
+            <button
+              key={label}
+              aria-pressed={p.agentMode === lead}
+              className={lead ? "agent" : ""}
+              disabled={!!p.session && !p.session.draft && (p.session.busy || !p.session.attached) && p.agentMode !== lead}
+              title={p.session?.busy ? "응답이 끝난 뒤 바꿀 수 있어요" : undefined}
+              onClick={() => p.agentMode !== lead && p.onChangeMode({ lead })}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      )}
       <div className="composer">
         <textarea
           ref={textRef}
           value={draft}
           rows={1}
-          placeholder={p.connecting ? `${agent?.name ?? "에이전트"} 연결 중…` : "에이전트에게 메시지 보내기"}
+          placeholder={
+            p.connecting
+              ? `${agent?.name ?? "에이전트"} 연결 중…`
+              : p.isTask
+                ? "이 작업에 직접 지시하기 (총괄도 내용을 받아요)"
+                : p.agentMode
+                  ? "총괄에게 지시하기"
+                  : "에이전트에게 메시지 보내기"
+          }
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
@@ -121,7 +158,7 @@ export default function Composer(p: Props) {
               title={p.session && !p.session.draft ? "대화 중에는 에이전트를 바꿀 수 없어요" : "에이전트 선택"}
             >
               <Bot size={15} />
-              {p.accountName}
+              {p.agentMode && !p.isTask ? `총괄 · ${p.accountName}` : p.accountName}
               {(!p.session || p.session.draft) && <ChevronDown size={14} />}
             </button>
           )}
@@ -164,6 +201,38 @@ export default function Composer(p: Props) {
           }
         </Popover>
 
+        {p.agentMode && !p.isTask && (
+          <Popover
+            button={({ toggle }) => (
+              <button
+                className="chip team-chip"
+                onClick={toggle}
+                title="총괄이 일을 맡길 팀 (대화 중에도 바꿀 수 있어요)"
+              >
+                <Users size={15} />
+                {p.teams.find((t) => t.id === p.teamId)?.name ?? "자동"}
+                <ChevronDown size={14} />
+              </button>
+            )}
+          >
+            {(close) => (
+              <MenuSection title="팀">
+                {p.teams.map((t) => (
+                  <MenuItem
+                    key={t.id}
+                    label={t.name}
+                    description={t.members.map((m) => m.name).join(", ")}
+                    selected={t.id === p.teamId}
+                    onClick={() => {
+                      close();
+                      if (t.id !== p.teamId) p.onChangeMode({ team: t.id });
+                    }}
+                  />
+                ))}
+              </MenuSection>
+            )}
+          </Popover>
+        )}
         {agent?.launchOptions.map((opt) => (
           <LaunchChip
             key={opt.id}

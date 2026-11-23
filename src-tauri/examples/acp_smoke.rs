@@ -56,8 +56,10 @@ async fn main() {
                     };
                     let _ = pump_conn.respond(id, reply).await;
                 }
+                Incoming::Response { id, result } => pump_conn.resolve(id, result).await,
                 Incoming::Stderr(line) => eprintln!("  stderr| {line}"),
                 Incoming::Exited(code) => {
+                    pump_conn.fail_pending().await;
                     println!("\n[exited] {code:?}");
                     break;
                 }
@@ -81,10 +83,38 @@ async fn main() {
     println!("agentCapabilities: {}", init["agentCapabilities"]);
 
     // SMOKE_RESUME=<sessionId> reattaches an existing session instead of creating one.
-    let (method, params) = match std::env::var("SMOKE_RESUME") {
-        Ok(id) => ("session/resume", json!({ "sessionId": id, "cwd": cwd, "mcpServers": [] })),
-        Err(_) => ("session/new", json!({ "cwd": cwd, "mcpServers": [] })),
+    // SMOKE_LIST=1 lists the agent's sessions for cwd and exits.
+    if std::env::var_os("SMOKE_LIST").is_some() {
+        match conn.request("session/list", json!({ "cwd": cwd })).await {
+            Ok(res) => {
+                let sessions = res["sessions"].as_array().cloned().unwrap_or_default();
+                println!("session/list → {} sessions (nextCursor: {})", sessions.len(), res["nextCursor"]);
+                for s in sessions.iter().take(8) {
+                    println!("  {} | {} | {}", s["sessionId"], s["updatedAt"], truncate(&s["title"].to_string(), 70));
+                }
+            }
+            Err(e) => println!("session/list failed: {e}"),
+        }
+        conn.kill();
+        return;
+    }
+    // SMOKE_LOAD=<sessionId> replays a session with session/load and exits.
+    if let Ok(id) = std::env::var("SMOKE_LOAD") {
+        let res = conn.request("session/load", json!({ "sessionId": id, "cwd": cwd, "mcpServers": [] })).await;
+        println!("\nsession/load → {}", if res.is_ok() { "ok" } else { "failed" });
+        conn.kill();
+        return;
+    }
+
+    // SMOKE_MCP=<McpServer[] json> and SMOKE_META=<_meta json> are passed through.
+    let mcp: Value = std::env::var("SMOKE_MCP").ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(json!([]));
+    let (method, mut params) = match std::env::var("SMOKE_RESUME") {
+        Ok(id) => ("session/resume", json!({ "sessionId": id, "cwd": cwd, "mcpServers": mcp })),
+        Err(_) => ("session/new", json!({ "cwd": cwd, "mcpServers": mcp })),
     };
+    if let Some(meta) = std::env::var("SMOKE_META").ok().and_then(|s| serde_json::from_str::<Value>(&s).ok()) {
+        params["_meta"] = meta;
+    }
     let session = match conn.request(method, params.clone()).await {
         Ok(s) => s,
         Err(e) => {
@@ -110,11 +140,34 @@ async fn main() {
         println!("set_config_option {config_id} → {}", if res.is_ok() { "ok" } else { "failed" });
     }
 
+    // SMOKE_REATTACH="<second prompt>": after the first prompt, close the session and
+    // resume it in the same process (with SMOKE_MCP if set), then send this prompt.
+    let reattach = std::env::var("SMOKE_REATTACH").ok();
+
     if let Some(prompt) = prompt {
         let res = conn
             .request("session/prompt", json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": prompt }] }))
             .await;
-        println!("\nprompt → {res:?}");
+        println!("\nprompt → {}", if res.is_ok() { "ok" } else { "failed" });
+        if let Some(second) = reattach {
+            let closed = conn.request("session/close", json!({ "sessionId": session_id })).await;
+            println!("session/close → {}", if closed.is_ok() { "ok".to_string() } else { format!("{closed:?}") });
+            // SMOKE_REATTACH_MCP overrides the MCP servers for the second attach.
+            let mcp2: Value = std::env::var("SMOKE_REATTACH_MCP")
+                .ok()
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_else(|| mcp.clone());
+            let mut params = json!({ "sessionId": session_id, "cwd": cwd, "mcpServers": mcp2 });
+            if let Some(meta) = std::env::var("SMOKE_META").ok().and_then(|s| serde_json::from_str::<Value>(&s).ok()) {
+                params["_meta"] = meta;
+            }
+            let resumed = conn.request("session/resume", params).await;
+            println!("session/resume → {}", if resumed.is_ok() { "ok".to_string() } else { format!("{resumed:?}") });
+            let res = conn
+                .request("session/prompt", json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": second }] }))
+                .await;
+            println!("\nprompt 2 → {}", if res.is_ok() { "ok" } else { "failed" });
+        }
     }
     conn.kill();
 }

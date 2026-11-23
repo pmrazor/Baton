@@ -1,15 +1,18 @@
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import {
   ChevronDown,
   ChevronRight,
   Folder,
   FolderOpen,
   FolderPlus,
+  History,
   Lock,
+  MessageSquare,
   PanelLeft,
   PanelLeftOpen,
   Settings,
   SquarePen,
+  Workflow,
   X,
 } from "lucide-react";
 import type { AgentInfo, PermissionRequest, Session } from "../types";
@@ -27,6 +30,7 @@ interface Props {
   onAddWorkspace: () => void;
   onSelectWorkspace: (path: string) => void;
   onRemoveWorkspace: (path: string) => void;
+  onImport: (path: string) => void;
   onActivate: (key: string) => void;
   onCloseSession: (key: string) => void;
   /** Icon-only rail instead of the full sidebar. */
@@ -82,9 +86,12 @@ export default function Sidebar(p: Props) {
           </button>
         )}
         {p.workspaces.map((ws) => {
+          // Task chats are listed under their lead, not on their own.
           const sessions = p.sessions
-            .filter((s) => s.cwd === ws && !s.draft)
+            .filter((s) => s.cwd === ws && !s.draft && !(s.parent && p.sessions.some((l) => l.key === s.parent!.key)))
             .sort((a, b) => b.updatedAt - a.updatedAt);
+          const childrenOf = (lead: Session) =>
+            p.sessions.filter((s) => s.parent?.key === lead.key).sort((a, b) => a.createdAt - b.createdAt);
           const isOpen = !collapsed[ws];
           const selected = ws === p.workspace;
           return (
@@ -106,6 +113,9 @@ export default function Sidebar(p: Props) {
                   <button className="icon-btn sm" title="이 폴더에서 새 대화" onClick={() => p.onNewChat(ws)}>
                     <SquarePen size={14} />
                   </button>
+                  <button className="icon-btn sm" title="이전 대화 가져오기" onClick={() => p.onImport(ws)}>
+                    <History size={14} />
+                  </button>
                   <button className="icon-btn sm" title="목록에서 제거" onClick={() => p.onRemoveWorkspace(ws)}>
                     <X size={14} />
                   </button>
@@ -114,9 +124,11 @@ export default function Sidebar(p: Props) {
 
               {isOpen &&
                 sessions.map((s) => (
-                  <div key={s.key} className={`session-row ${s.key === p.activeKey ? "active" : ""}`}>
+                  <Fragment key={s.key}>
+                  <div className={`session-row ${s.key === p.activeKey ? "active" : ""}`}>
                     <button className="session-main" onClick={() => p.onActivate(s.key)}>
                       <span className="ellipsis">{s.title}</span>
+                      {s.lead && <span className="lead-tag">총괄</span>}
                       <span className="session-meta">
                         {waiting.has(s.key) ? (
                           <Lock size={12} className="waiting" aria-label="권한 요청 대기" />
@@ -131,6 +143,18 @@ export default function Sidebar(p: Props) {
                       <X size={13} />
                     </button>
                   </div>
+                  {childrenOf(s).map((c) => {
+                    const tone = taskTone(s, c, waiting);
+                    return (
+                      <div key={c.key} className={`session-row child ${c.key === p.activeKey ? "active" : ""}`}>
+                        <button className="session-main" onClick={() => p.onActivate(c.key)}>
+                          <span className={`dot task-dot ${tone}`} />
+                          <span className="ellipsis">{c.title}</span>
+                        </button>
+                      </div>
+                    );
+                  })}
+                  </Fragment>
                 ))}
             </div>
           );
@@ -145,23 +169,26 @@ export default function Sidebar(p: Props) {
   );
 }
 
+/** Status colour of a task chat, from its lead's task record. */
+function taskTone(lead: Session, child: Session, waiting: Set<string>) {
+  const task = lead.tasks?.find((t) => t.id === child.parent?.taskId);
+  if (waiting.has(child.key)) return "wait";
+  if (task?.status === "running" || task?.status === "starting" || child.busy) return "run";
+  if (task?.status === "done") return "done";
+  if (task?.status === "failed") return "fail";
+  return "idle";
+}
+
 function Rail(p: Props & { waiting: Set<string> }) {
-  const openWorkspace = (ws: string) => {
-    p.onSelectWorkspace(ws);
-    const current = p.sessions.find((s) => s.key === p.activeKey);
-    if (current?.cwd === ws) return;
-    const latest = p.sessions
-      .filter((s) => s.cwd === ws && !s.draft)
-      .reduce<Session | undefined>((a, b) => (!a || b.updatedAt > a.updatedAt ? b : a), undefined);
-    if (latest) p.onActivate(latest.key);
-    else p.onNewChat(ws);
-  };
+  // Workspaces whose chats are unfolded under their letter.
+  const [open, setOpen] = useState<Record<string, boolean>>(() => (p.workspace ? { [p.workspace]: true } : {}));
 
   return (
     <aside className="sidebar rail">
       <div className="rail-top" data-tauri-drag-region>
-        <button className="icon-btn" title="사이드바 펼치기" onClick={p.onToggleRail}>
-          <PanelLeftOpen size={18} />
+        <button className="rail-logo" title="사이드바 펼치기" onClick={p.onToggleRail}>
+          <img src={logo} alt="" />
+          <PanelLeftOpen size={18} className="rail-logo-hover" />
         </button>
       </div>
       <button className="icon-btn rail-btn" title="새 대화" onClick={() => p.onNewChat()}>
@@ -172,23 +199,69 @@ function Rail(p: Props & { waiting: Set<string> }) {
 
       <nav className="rail-workspaces">
         {p.workspaces.map((ws) => {
-          const sessions = p.sessions.filter((s) => s.cwd === ws);
-          const flag = sessions.some((s) => p.waiting.has(s.key))
-            ? "waiting"
-            : sessions.some((s) => s.busy)
-              ? "busy"
-              : null;
+          const all = p.sessions.filter((s) => s.cwd === ws);
+          const flag = all.some((s) => p.waiting.has(s.key)) ? "waiting" : all.some((s) => s.busy) ? "busy" : null;
           const name = baseName(ws);
+          const isOpen = !!open[ws];
+          const chats = all
+            .filter((s) => !s.draft && !(s.parent && p.sessions.some((l) => l.key === s.parent!.key)))
+            .sort((a, b) => b.updatedAt - a.updatedAt);
           return (
-            <button
-              key={ws}
-              className={`rail-ws ${ws === p.workspace ? "selected" : ""}`}
-              title={`${name}\n${ws}`}
-              onClick={() => openWorkspace(ws)}
-            >
-              {name.charAt(0).toUpperCase()}
-              {flag && <span className={`rail-badge ${flag}`} />}
-            </button>
+            <div key={ws} className={`rail-group ${isOpen ? "open" : ""}`}>
+              <button
+                className={`rail-ws ${ws === p.workspace ? "selected" : ""}`}
+                title={`${name}\n${ws}`}
+                aria-expanded={isOpen}
+                onClick={() => {
+                  p.onSelectWorkspace(ws);
+                  setOpen((o) => ({ ...o, [ws]: !o[ws] }));
+                }}
+              >
+                {name.charAt(0).toUpperCase()}
+                {flag && !isOpen && <span className={`rail-badge ${flag}`} />}
+              </button>
+              {isOpen && (
+                <div className="rail-chats">
+                  {chats.length === 0 && (
+                    <button className="icon-btn rail-chat" title="이 폴더에서 새 대화" onClick={() => p.onNewChat(ws)}>
+                      <SquarePen size={15} />
+                    </button>
+                  )}
+                  {chats.map((c) => {
+                    const Icon = c.lead ? Workflow : MessageSquare;
+                    const children = p.sessions
+                      .filter((s) => s.parent?.key === c.key)
+                      .sort((a, b) => a.createdAt - b.createdAt);
+                    return (
+                      <Fragment key={c.key}>
+                        <button
+                          className={`rail-chat ${c.key === p.activeKey ? "active" : ""} ${c.lead ? "lead" : ""}`}
+                          title={c.title}
+                          onClick={() => p.onActivate(c.key)}
+                        >
+                          <Icon size={15} />
+                          {p.waiting.has(c.key) ? (
+                            <span className="rail-badge waiting" />
+                          ) : (
+                            c.busy && <span className="rail-badge busy" />
+                          )}
+                        </button>
+                        {children.map((t) => (
+                          <button
+                            key={t.key}
+                            className={`rail-task ${t.key === p.activeKey ? "active" : ""}`}
+                            title={t.title}
+                            onClick={() => p.onActivate(t.key)}
+                          >
+                            <span className={`dot task-dot ${taskTone(c, t, p.waiting)}`} />
+                          </button>
+                        ))}
+                      </Fragment>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
           );
         })}
         <button className="icon-btn rail-btn" title="폴더 추가" onClick={p.onAddWorkspace}>
