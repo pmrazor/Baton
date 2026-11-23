@@ -154,6 +154,8 @@ export interface Session {
   attached: boolean;
   /** Launch option values the session's process was started with. */
   launch: Launch;
+  /** Why reconnecting failed; set to stop automatic retries until the user asks. */
+  attachError?: string;
   /** Set on a lead (agent mode) conversation. */
   lead?: { teamId: string };
   /** Tasks this lead handed out, newest last. */

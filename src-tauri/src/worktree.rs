@@ -42,12 +42,24 @@ pub struct MergeOutcome {
 fn git(dir: &Path) -> Command {
     let mut cmd = Command::new("git");
     cmd.arg("-C").arg(dir).stdin(Stdio::null());
+    hide_window(&mut cmd);
     // commit-tree needs an identity; don't depend on the user's git config.
     cmd.env("GIT_AUTHOR_NAME", "Baton")
         .env("GIT_AUTHOR_EMAIL", "baton@localhost")
         .env("GIT_COMMITTER_NAME", "Baton")
         .env("GIT_COMMITTER_EMAIL", "baton@localhost");
     cmd
+}
+
+/// Windows: no console window flashing up for each git call.
+fn hide_window(cmd: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(crate::acp::CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    let _ = cmd;
 }
 
 fn run(cmd: &mut Command) -> Result<Vec<u8>, String> {
@@ -83,9 +95,13 @@ fn snapshot(dir: &Path, exclude: &[String], label: &str) -> Result<String, Strin
         Some(_) => with_index(&["read-tree", "HEAD"])?,
         None => with_index(&["read-tree", "--empty"])?,
     };
-    let mut add = vec!["add".to_string(), "-A".into(), "--".into(), ".".into()];
-    add.extend(exclude.iter().map(|e| format!(":(exclude){e}")));
-    with_index(&add.iter().map(String::as_str).collect::<Vec<_>>())?;
+    with_index(&["add", "-A", "--", "."])?;
+    // Drop linked folders afterwards rather than excluding them by pathspec:
+    // naming a path .gitignore already covers (e.g. Rust's `target`) makes
+    // `git add` fail outright.
+    for path in exclude {
+        with_index(&["rm", "-r", "-q", "--cached", "--ignore-unmatch", "--", path])?;
+    }
     let tree = with_index(&["write-tree"])?;
     let _ = std::fs::remove_file(&index);
     let mut commit = git(dir);
@@ -124,7 +140,10 @@ fn link_dir(source: &Path, target: &Path) -> std::io::Result<()> {
 #[cfg(windows)]
 fn link_dir(source: &Path, target: &Path) -> std::io::Result<()> {
     // Junctions need no admin rights, unlike directory symlinks.
-    let status = Command::new("cmd").args(["/C", "mklink", "/J"]).arg(target).arg(source).status()?;
+    let mut cmd = Command::new("cmd");
+    cmd.args(["/C", "mklink", "/J"]).arg(target).arg(source).stdout(Stdio::null());
+    hide_window(&mut cmd);
+    let status = cmd.status()?;
     if status.success() { Ok(()) } else { Err(std::io::Error::other("mklink failed")) }
 }
 
@@ -254,12 +273,14 @@ mod tests {
         std::fs::write(repo.join("b.txt"), "keep\nlocal edit\n").unwrap();
         std::fs::write(repo.join("new.txt"), "untracked\n").unwrap();
         std::fs::create_dir_all(repo.join("node_modules")).unwrap();
-        std::fs::write(repo.join(".gitignore"), "node_modules/\n").unwrap();
+        std::fs::create_dir_all(repo.join("target")).unwrap();
+        // Both ignore styles: `dir/` (doesn't match the symlink) and Rust's bare `target` (does).
+        std::fs::write(repo.join(".gitignore"), "node_modules/\ntarget\n").unwrap();
 
         let sb = create(&repo, &root.join("wts"), "t1").unwrap();
         assert_eq!(std::fs::read_to_string(sb.path.join("b.txt")).unwrap(), "keep\nlocal edit\n");
         assert!(sb.path.join("new.txt").exists());
-        assert_eq!(sb.linked, vec!["node_modules".to_string()]);
+        assert_eq!(sb.linked, vec!["node_modules".to_string(), "target".to_string()]);
 
         // Task edits line 1 of a.txt and b.txt, adds c.txt; workspace edits line 3 of a.txt and b.txt.
         std::fs::write(sb.path.join("a.txt"), "ONE\ntwo\nthree\n").unwrap();

@@ -1954,3 +1954,45 @@ button {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* A workspace whose folder is gone: still listed, clearly unusable. */
+.workspace-row.missing .workspace-name,
+.rail-ws.missing {
+  opacity: 0.45;
+  text-decoration: line-through;
+}
+
+/* ---------- Windows: app-drawn title bar controls ---------- */
+html,
+body {
+  background: var(--bg);
+}
+.window-controls {
+  position: fixed;
+  top: 0;
+  right: 0;
+  z-index: 40;
+  display: flex;
+  height: 48px;
+}
+.window-controls button {
+  display: grid;
+  place-items: center;
+  width: 46px;
+  height: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--text-2);
+}
+.window-controls button:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+.window-controls button.close:hover {
+  background: #c42b1c;
+  color: #fff;
+}
+/* Keep titles and tabs clear of the controls. */
+.windows .title-bar {
+  padding-right: 150px;
+}

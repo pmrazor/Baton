@@ -37,6 +37,7 @@ interface Props {
   teamId: string;
   onChangeMode: (opts: { lead?: boolean; team?: string }) => void;
   onOpenSession: (key: string) => void;
+  onRetryAttach: (key: string) => void;
   onMergeTask: (session: Session, taskId: string) => void;
   /** Shown under the tab bar (e.g. an available update). */
   banner?: ReactNode;
@@ -115,6 +116,19 @@ export default function ChatView(p: Props) {
       <TabBar session={session} tab={tab} onTab={p.onTab} />
 
       {p.banner}
+      {session?.attachError && (
+        <div className="auth-banner">
+          <div>
+            <b>대화를 다시 연결하지 못했어요</b>
+            <div className="muted small">{session.attachError}</div>
+          </div>
+          <div className="auth-actions">
+            <button className="btn btn-primary" onClick={() => p.onRetryAttach(session.key)}>
+              다시 시도
+            </button>
+          </div>
+        </div>
+      )}
       {state.authPrompt && <AuthBanner {...p} agentName={agentName(state.authPrompt.agentId)} />}
 
       {!state.workspace ? (

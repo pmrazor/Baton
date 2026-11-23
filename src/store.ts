@@ -45,6 +45,8 @@ export interface State {
   identities: Record<string, AuthStatus>;
   profiles: Profile[];
   teams: Team[];
+  /** Workspace / chat folders that no longer exist on disk. */
+  missing: string[];
 }
 
 export const initialState: State = {
@@ -61,6 +63,7 @@ export const initialState: State = {
   identities: {},
   profiles: [],
   teams: [],
+  missing: [],
 };
 
 export type Action =
@@ -96,6 +99,9 @@ export type Action =
   | { type: "profiles"; profiles: Profile[] }
   | { type: "teams"; teams: Team[] }
   | { type: "leadTeam"; key: string; teamId: string }
+  | { type: "missing"; paths: string[] }
+  | { type: "attachFailed"; key: string; error: string }
+  | { type: "attachRetry"; key: string }
   | {
       type: "importSession";
       agentId: string;
@@ -330,6 +336,17 @@ export function reducer(state: State, action: Action): State {
         configOptions: action.configOptions?.length ? action.configOptions : s.configOptions,
         items: [...s.items, { kind: "notice", id: nextId(), text: action.note, tone: "info" }],
       }));
+    case "missing": {
+      // Don't leave a vanished folder selected when another one is available.
+      const usable = state.workspaces.filter((w) => !action.paths.includes(w));
+      const workspace =
+        state.workspace && action.paths.includes(state.workspace) ? (usable[0] ?? state.workspace) : state.workspace;
+      return { ...state, missing: action.paths, workspace };
+    }
+    case "attachFailed":
+      return mapSession(state, action.key, (s) => ({ ...s, attachError: action.error }));
+    case "attachRetry":
+      return mapSession(state, action.key, (s) => ({ ...s, attachError: undefined }));
     case "leadTeam":
       return mapSession(state, action.key, (s) => (s.lead ? { ...s, lead: { teamId: action.teamId } } : s));
     case "taskUpdate":

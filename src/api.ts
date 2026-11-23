@@ -53,6 +53,7 @@ export const api = {
     invoke<ImportResult>("import_session", { agentId, sessionId, cwd, launch, teamId }),
   switchMode: (agentId: string, sessionId: string, cwd: string, teamId: string | null) =>
     invoke<Omit<NewSessionResult, "sessionId">>("switch_mode", { agentId, sessionId, cwd, teamId }),
+  missingPaths: (paths: string[]) => invoke<string[]>("missing_paths", { paths }),
   mergeTask: (taskId: string) =>
     invoke<{ merged_files: string[]; conflicts: string[] }>("merge_task", { taskId }),
   discardTask: (taskId: string) => invoke<void>("discard_task", { taskId }),

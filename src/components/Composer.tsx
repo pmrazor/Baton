@@ -73,7 +73,7 @@ export default function Composer(p: Props) {
   const [draft, setDraft] = useState("");
   const textRef = useRef<HTMLTextAreaElement>(null);
   const busy = p.session?.busy ?? false;
-  const ready = !!p.session && !p.connecting;
+  const ready = !!p.session && !p.connecting && !p.session.attachError;
   const { mode, model, effort, rest } = classify(p.session?.configOptions ?? []);
   const agent = p.agents.find((a) => a.id === p.agentId);
   const sessionModes = !mode && p.session?.modes && p.session.modes.availableModes.length > 1 ? p.session.modes : null;
@@ -124,6 +124,8 @@ export default function Composer(p: Props) {
           placeholder={
             p.connecting
               ? `${agent?.name ?? "에이전트"} 연결 중…`
+              : p.session?.attachError
+                ? "연결되지 않은 대화예요 · 위의 [다시 시도]를 눌러 주세요"
               : p.isTask
                 ? "이 작업에 직접 지시하기 (총괄도 내용을 받아요)"
                 : p.agentMode

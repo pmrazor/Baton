@@ -8,6 +8,7 @@ import ChatView, { TitleBar, type Tab } from "./components/ChatView";
 import SettingsModal from "./components/SettingsModal";
 import ImportModal, { type Imported } from "./components/ImportModal";
 import UpdateBanner from "./components/UpdateBanner";
+import WindowControls from "./components/WindowControls";
 import { findUpdate } from "./update";
 import type { Update } from "@tauri-apps/plugin-updater";
 
@@ -24,7 +25,7 @@ const STORE = {
 };
 
 /** What goes to disk: everything except live-process state. */
-function toSaved({ busy: _busy, attached: _attached, draft: _draft, ...rest }: Session) {
+function toSaved({ busy: _busy, attached: _attached, draft: _draft, attachError: _attachError, ...rest }: Session) {
   return rest;
 }
 
@@ -82,6 +83,9 @@ function init(): State {
 }
 
 if (navigator.userAgent.includes("Mac")) document.documentElement.classList.add("mac");
+// Windows has no native title bar (tauri.windows.conf.json); the app draws its own controls.
+const isWindows = navigator.userAgent.includes("Windows");
+if (isWindows) document.documentElement.classList.add("windows");
 
 export default function App() {
   const [state, dispatch] = useReducer(reducer, undefined, init);
@@ -184,6 +188,14 @@ export default function App() {
       const team = opts?.team ?? teamId;
       const ws = workspace ?? state.workspace;
       if (!ws) return addWorkspace();
+      if (state.missing.includes(ws)) {
+        const agentForPrompt = agentId ?? state.agents[0]?.id ?? "";
+        dispatch({
+          type: "authPrompt",
+          prompt: { agentId: agentForPrompt, profileId: "default", message: `작업 폴더를 찾을 수 없어요: ${ws}`, methods: [] },
+        });
+        return;
+      }
       const agent = agentId ?? read<string | null>(STORE.agent, null) ?? state.agents[0]?.id;
       if (!agent || creating.current) return;
       // Launch choices (permission, account, …) are remembered per agent for the next new chat.
@@ -224,7 +236,7 @@ export default function App() {
         setConnecting(null);
       }
     },
-    [state.workspace, state.agents, addWorkspace, agentMode, teamId],
+    [state.workspace, state.agents, state.missing, addWorkspace, agentMode, teamId],
   );
 
   /** Switch chat/agent mode or team; an unused draft is recreated to match. */
@@ -298,17 +310,44 @@ export default function App() {
 
   useEffect(() => setTab("chat"), [state.activeKey]);
 
-  // With a workspace open there is always a chat ready to type into.
+  // Find folders that disappeared since last time, before anything tries to use them.
+  const [foldersChecked, setFoldersChecked] = useState(false);
   useEffect(() => {
-    if (historyLoaded && state.workspace && !active && !connecting && state.agents.length > 0 && !state.authPrompt) {
+    if (!historyLoaded) return;
+    const paths = [...new Set([...state.workspaces, ...state.sessions.map((s) => s.cwd)])];
+    api
+      .missingPaths(paths)
+      .then((missing) => dispatch({ type: "missing", paths: missing }))
+      .finally(() => setFoldersChecked(true));
+    // Re-check when the folder list changes (e.g. a folder was re-added).
+  }, [historyLoaded, state.workspaces]);
+
+  // With a workspace open there is always a chat ready to type into.
+  const workspaceMissing = !!state.workspace && state.missing.includes(state.workspace);
+  useEffect(() => {
+    if (
+      foldersChecked &&
+      state.workspace &&
+      !workspaceMissing &&
+      !active &&
+      !connecting &&
+      state.agents.length > 0 &&
+      !state.authPrompt
+    ) {
       newChat();
     }
-  }, [historyLoaded, state.workspace, active, connecting, state.agents.length, state.authPrompt, newChat]);
+  }, [foldersChecked, state.workspace, workspaceMissing, active, connecting, state.agents.length, state.authPrompt, newChat]);
 
   // A conversation restored from disk reconnects to its agent session when opened.
+  // One attempt per opening: a failure is recorded and waits for the user's retry.
   useEffect(() => {
-    if (!active || active.attached || active.draft || attaching.current === active.key) return;
+    if (!foldersChecked || !active || active.attached || active.draft || active.attachError) return;
+    if (attaching.current === active.key) return;
     const s = active;
+    if (state.missing.includes(s.cwd)) {
+      dispatch({ type: "attachFailed", key: s.key, error: `작업 폴더를 찾을 수 없어요: ${s.cwd}` });
+      return;
+    }
     attaching.current = s.key;
     (async () => {
       try {
@@ -341,13 +380,13 @@ export default function App() {
             tone: "info",
           });
         } catch (e2) {
-          dispatch({ type: "notice", key: s.key, text: toHubError(e2).message, tone: "error" });
+          dispatch({ type: "attachFailed", key: s.key, error: toHubError(e2).message });
         }
       } finally {
         attaching.current = null;
       }
     })();
-  }, [active, setConfig]);
+  }, [active, setConfig, foldersChecked, state.missing]);
 
   const deleteSession = useCallback(
     async (key: string) => {
@@ -455,6 +494,7 @@ export default function App() {
         onSelectWorkspace={(path) => dispatch({ type: "workspaceSelect", path })}
         onRemoveWorkspace={(path) => dispatch({ type: "workspaceRemove", path })}
         onImport={setImportCwd}
+        missing={state.missing}
         onActivate={(key) => dispatch({ type: "activate", key })}
         onCloseSession={deleteSession}
         rail={rail}
@@ -464,7 +504,17 @@ export default function App() {
       <ChatView
         state={state}
         session={active}
-        connecting={connecting ?? (active && !active.attached ? active.agentId : null)}
+        connecting={connecting ?? (active && !active.attached && !active.attachError ? active.agentId : null)}
+        onRetryAttach={(key) => {
+          // Re-check the folder first: it may have been restored.
+          const cwd = state.sessions.find((s) => s.key === key)?.cwd;
+          api
+            .missingPaths(cwd ? [cwd] : [])
+            .then((gone) => {
+              dispatch({ type: "missing", paths: [...state.missing.filter((m) => m !== cwd), ...gone] });
+              dispatch({ type: "attachRetry", key });
+            });
+        }}
         tab={tab}
         showTitle={!rail}
         onTab={setTab}
@@ -502,6 +552,7 @@ export default function App() {
             .catch((e) => dispatch({ type: "notice", key: session.key, text: toHubError(e).message, tone: "error" }))
         }
       />
+      {isWindows && <WindowControls />}
       {importCwd && (
         <ImportModal
           state={state}

@@ -223,12 +223,18 @@ fn route_message(msg: Value, tx: &mpsc::UnboundedSender<Incoming>) {
     }
 }
 
+/// Windows: hide the console window a GUI app's child would otherwise get.
+/// The agent's own children (node → claude) inherit the hidden console.
+pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 /// On Windows, `npx` and friends are `.cmd` shims that `CreateProcess` cannot
-/// launch directly, so route everything through `cmd /C`.
+/// launch directly, so route everything through `cmd /C`, without a window.
 fn platform_command(command: &str, args: &[String]) -> Command {
     if cfg!(windows) {
         let mut cmd = Command::new("cmd");
         cmd.arg("/C").arg(command).args(args);
+        #[cfg(windows)]
+        cmd.creation_flags(CREATE_NO_WINDOW);
         cmd
     } else {
         let mut cmd = Command::new(command);

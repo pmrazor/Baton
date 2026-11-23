@@ -217,6 +217,12 @@ async fn discard_task(orchestra: State<'_, Orchestra>, task_id: String) -> Resul
     orchestra.discard(&task_id).await.map_err(plain_error)
 }
 
+/// Which of these folders no longer exist (deleted, renamed, drive unplugged).
+#[tauri::command]
+fn missing_paths(paths: Vec<String>) -> Vec<String> {
+    paths.into_iter().filter(|p| !std::path::Path::new(p).is_dir()).collect()
+}
+
 /// Change the team of a running lead conversation.
 #[tauri::command]
 fn set_lead_team(orchestra: State<'_, Orchestra>, agent_id: String, session_id: String, team_id: String) {
@@ -404,6 +410,7 @@ pub fn run() {
             import_session,
             switch_mode,
             merge_task,
+            missing_paths,
             discard_task,
             agent_options,
             list_teams,

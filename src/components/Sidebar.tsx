@@ -31,6 +31,8 @@ interface Props {
   onSelectWorkspace: (path: string) => void;
   onRemoveWorkspace: (path: string) => void;
   onImport: (path: string) => void;
+  /** Folders that no longer exist on disk. */
+  missing: string[];
   onActivate: (key: string) => void;
   onCloseSession: (key: string) => void;
   /** Icon-only rail instead of the full sidebar. */
@@ -96,7 +98,10 @@ export default function Sidebar(p: Props) {
           const selected = ws === p.workspace;
           return (
             <div key={ws} className="workspace">
-              <div className={`workspace-row ${selected ? "selected" : ""}`} title={ws}>
+              <div
+                className={`workspace-row ${selected ? "selected" : ""} ${p.missing.includes(ws) ? "missing" : ""}`}
+                title={p.missing.includes(ws) ? `폴더를 찾을 수 없어요: ${ws}` : ws}
+              >
                 <button
                   className="workspace-name"
                   onClick={() => {
@@ -209,8 +214,8 @@ function Rail(p: Props & { waiting: Set<string> }) {
           return (
             <div key={ws} className={`rail-group ${isOpen ? "open" : ""}`}>
               <button
-                className={`rail-ws ${ws === p.workspace ? "selected" : ""}`}
-                title={`${name}\n${ws}`}
+                className={`rail-ws ${ws === p.workspace ? "selected" : ""} ${p.missing.includes(ws) ? "missing" : ""}`}
+                title={p.missing.includes(ws) ? `${name}\n폴더를 찾을 수 없어요: ${ws}` : `${name}\n${ws}`}
                 aria-expanded={isOpen}
                 onClick={() => {
                   p.onSelectWorkspace(ws);
