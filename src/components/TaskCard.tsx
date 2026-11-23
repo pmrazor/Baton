@@ -26,14 +26,16 @@ interface Props {
   onPermission: (key: string, optionId: string | null) => void;
   onMerge: (taskId: string) => void;
   onDiscard: (taskId: string) => void;
+  /** The lead is mid-turn and may still be reviewing finished tasks. */
+  leadBusy: boolean;
 }
 
 /** One line on where an isolated (worktree) task's changes stand. */
-function mergeLine(t: TaskInfo): string | null {
+function mergeLine(t: TaskInfo, leadBusy: boolean): string | null {
   if (!t.isolated) return null;
   switch (t.mergeState) {
     case "pending":
-      return `${t.changes.length}개 파일 변경 · 병합 대기`;
+      return `${t.changes.length}개 파일 변경 · ${leadBusy ? "병합 검토 중" : "병합 대기"}`;
     case "merged":
       return "워크스페이스에 병합됨";
     case "conflict":
@@ -48,7 +50,7 @@ function mergeLine(t: TaskInfo): string | null {
 }
 
 /** The lead's delegation summary for one turn: one row per task. */
-export default function TaskCard({ tasks, agents, permissions, onOpen, onPermission, onMerge, onDiscard }: Props) {
+export default function TaskCard({ tasks, agents, permissions, onOpen, onPermission, onMerge, onDiscard, leadBusy }: Props) {
   const [now, setNow] = useState(Date.now());
   const live = tasks.some((t) => isTaskActive(t.status));
   useEffect(() => {
@@ -79,7 +81,7 @@ export default function TaskCard({ tasks, agents, permissions, onOpen, onPermiss
             ? "다른 작업이 파일을 수정 중이라 기다려요"
             : t.status === "failed" && t.error
               ? t.error
-              : (mergeLine(t) ?? (t.writes ? "파일 수정 작업" : "읽기 전용 작업"));
+              : (mergeLine(t, leadBusy) ?? (t.writes ? "파일 수정 작업" : "읽기 전용 작업"));
         return (
           <div key={t.id} className="task-block">
             <button className="task" disabled={!key} onClick={() => key && onOpen(key)}>
@@ -97,7 +99,8 @@ export default function TaskCard({ tasks, agents, permissions, onOpen, onPermiss
               </span>
               {key && <ChevronRight size={15} className="task-chev" />}
             </button>
-            {t.mergeState === "pending" && (
+            {/* While the lead is working it decides; the buttons are for what it leaves pending. */}
+            {t.mergeState === "pending" && !leadBusy && (
               <div className="task-merge">
                 <span className="grow mono ellipsis" title={t.changes.join("\n")}>
                   {t.changes.slice(0, 3).join(", ")}

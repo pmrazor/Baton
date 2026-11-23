@@ -200,6 +200,7 @@ function ConversationView(p: Props & { agentName: (id: string) => string }) {
                 onPermission={p.onPermission}
                 onMerge={(id) => session && p.onMergeTask(session, id)}
                 onDiscard={(id) => session && p.onDiscardTask(session, id)}
+                leadBusy={busy}
               />
             ))
           )}

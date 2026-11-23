@@ -70,6 +70,8 @@ interface TurnProps {
   onPermission?: (key: string, optionId: string | null) => void;
   onMerge?: (taskId: string) => void;
   onDiscard?: (taskId: string) => void;
+  /** The lead conversation is responding. */
+  leadBusy?: boolean;
 }
 
 export function TurnView(p: TurnProps) {
@@ -89,6 +91,7 @@ export function TurnView(p: TurnProps) {
           onPermission={onPermission ?? (() => {})}
           onMerge={p.onMerge ?? (() => {})}
           onDiscard={p.onDiscard ?? (() => {})}
+          leadBusy={!!p.leadBusy}
         />
       )}
       {turn.answer && <ChatItemView item={turn.answer} isLast={isLast && !running} />}
