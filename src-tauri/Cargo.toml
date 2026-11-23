@@ -1,6 +1,6 @@
 [package]
 name = "baton"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 description = "Baton: one workspace for many coding agents over ACP"
 edition = "2021"
 
@@ -20,3 +20,5 @@ tokio = { version = "1", features = ["process", "io-util", "sync", "time", "macr
 tauri-plugin-opener = "2"
 axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
 getrandom = "0.4.3"
+tauri-plugin-updater = "2.14.1"
+tauri-plugin-process = "2.4.0"

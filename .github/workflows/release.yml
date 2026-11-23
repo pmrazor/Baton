@@ -1,0 +1,82 @@
+# Builds installers for every platform and uploads them, with signed updater
+# files and latest.json, to a draft GitHub release.
+#
+# Run it by pushing a version tag (git tag v0.1.0-alpha.1 && git push origin --tags)
+# or from the Actions tab. Review the draft, then publish it as a normal
+# release (not "pre-release"): the in-app updater reads releases/latest, which
+# skips pre-releases.
+#
+# Secrets: TAURI_SIGNING_PRIVATE_KEY (contents of ~/.tauri/baton.key).
+# TAURI_SIGNING_PRIVATE_KEY_PASSWORD only if the key has a password.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            args: --target aarch64-apple-darwin
+            rust-targets: aarch64-apple-darwin
+          - platform: windows-latest
+            args: ""
+            rust-targets: ""
+          - platform: ubuntu-22.04
+            args: ""
+            rust-targets: ""
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux build dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-targets }}
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "src-tauri -> target"
+
+      - run: npm ci
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          # __VERSION__ is the app version from tauri.conf.json.
+          tagName: v__VERSION__
+          releaseName: Baton v__VERSION__
+          releaseBody: |
+            Download the installer for your system below.
+
+            - macOS (Apple Silicon): `.dmg`
+            - Windows (x64): `-setup.exe`
+            - Linux (x64): `.AppImage` or `.deb`
+
+            Baton needs the agents you want to use installed separately (Node.js for Claude Code, `dsh` for DeepSeek).
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}

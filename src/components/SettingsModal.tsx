@@ -3,6 +3,7 @@ import { ask } from "@tauri-apps/plugin-dialog";
 import { Check, Copy, LogIn, Pencil, Plus, Trash2, X } from "lucide-react";
 import { api, toHubError } from "../api";
 import TeamsPanel from "./TeamsPanel";
+import AboutPanel from "./AboutPanel";
 import type { State } from "../store";
 import { accountKey, DEFAULT_PROFILE, type AgentInfo, type AgentStatus } from "../types";
 
@@ -21,12 +22,13 @@ interface Props {
   onClose: () => void;
 }
 
-type SettingsTab = "accounts" | "teams" | "agents";
+type SettingsTab = "accounts" | "teams" | "agents" | "about";
 
 const SETTINGS_TABS: [SettingsTab, string][] = [
   ["accounts", "계정"],
   ["teams", "팀"],
   ["agents", "에이전트"],
+  ["about", "정보"],
 ];
 
 export default function SettingsModal({ state, onProfilesChanged, onTeamsChanged, onClose }: Props) {
@@ -64,6 +66,8 @@ export default function SettingsModal({ state, onProfilesChanged, onTeamsChanged
             .map((a) => <AgentAccounts key={a.id} agent={a} state={state} onChanged={onProfilesChanged} />)}
 
         {tab === "teams" && <TeamsPanel state={state} onChanged={onTeamsChanged} />}
+
+        {tab === "about" && <AboutPanel />}
 
         {tab === "agents" && (
           <>

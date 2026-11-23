@@ -7,6 +7,9 @@ import Sidebar from "./components/Sidebar";
 import ChatView, { TitleBar, type Tab } from "./components/ChatView";
 import SettingsModal from "./components/SettingsModal";
 import ImportModal, { type Imported } from "./components/ImportModal";
+import UpdateBanner from "./components/UpdateBanner";
+import { findUpdate } from "./update";
+import type { Update } from "@tauri-apps/plugin-updater";
 
 // Per-user conveniences only; losing them just resets the sidebar.
 const STORE = {
@@ -86,6 +89,17 @@ export default function App() {
   const [rail, setRail] = useState(() => read<boolean>(STORE.rail, false));
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [importCwd, setImportCwd] = useState<string | null>(null);
+  const [update, setUpdate] = useState<Update | null>(null);
+
+  // Look for a newer release shortly after launch; failures (offline, no release yet) stay quiet.
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      findUpdate()
+        .then(setUpdate)
+        .catch((e) => console.info("업데이트 확인 건너뜀:", e));
+    }, 5000);
+    return () => clearTimeout(timer);
+  }, []);
   const [tab, setTab] = useState<Tab>("chat");
   const [agentMode, setAgentMode] = useState(() => read<boolean>(STORE.agentMode, false));
   const [teamId, setTeamId] = useState(() => read<string>(STORE.team, AUTO_TEAM));
@@ -466,6 +480,7 @@ export default function App() {
         teamId={teamId}
         onChangeMode={changeMode}
         onOpenSession={(key) => dispatch({ type: "activate", key })}
+        banner={update && <UpdateBanner update={update} onDismiss={() => setUpdate(null)} />}
         onMergeTask={(session, taskId) =>
           api
             .mergeTask(taskId)

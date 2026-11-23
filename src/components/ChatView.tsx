@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import { FolderPlus } from "lucide-react";
 import { api } from "../api";
 import type { State } from "../store";
@@ -38,6 +38,8 @@ interface Props {
   onChangeMode: (opts: { lead?: boolean; team?: string }) => void;
   onOpenSession: (key: string) => void;
   onMergeTask: (session: Session, taskId: string) => void;
+  /** Shown under the tab bar (e.g. an available update). */
+  banner?: ReactNode;
   onDiscardTask: (session: Session, taskId: string) => void;
 }
 
@@ -112,6 +114,7 @@ export default function ChatView(p: Props) {
       {p.showTitle && <TitleBar state={state} session={session} onOpenSession={p.onOpenSession} />}
       <TabBar session={session} tab={tab} onTab={p.onTab} />
 
+      {p.banner}
       {state.authPrompt && <AuthBanner {...p} agentName={agentName(state.authPrompt.agentId)} />}
 
       {!state.workspace ? (
