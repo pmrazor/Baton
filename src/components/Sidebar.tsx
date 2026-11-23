@@ -13,6 +13,7 @@ import {
   X,
 } from "lucide-react";
 import type { AgentInfo, PermissionRequest, Session } from "../types";
+import logo from "../assets/logo.png";
 import { sessionKey } from "../types";
 
 interface Props {
@@ -54,7 +55,7 @@ export default function Sidebar(p: Props) {
     <aside className="sidebar">
       <div className="sidebar-top" data-tauri-drag-region>
         <div className="brand" data-tauri-drag-region>
-          <span className="brand-mark" aria-hidden />
+          <img className="brand-mark" src={logo} alt="" />
           Baton
         </div>
         <button className="icon-btn" title="사이드바 접기" onClick={p.onToggleRail}>
