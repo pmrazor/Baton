@@ -38,6 +38,8 @@ const SERVER_NAME: &str = "baton";
 const MAX_WAIT: Duration = Duration::from_secs(40);
 /// Results handed back to the lead are clipped to keep its context small.
 const MAX_RESULT_CHARS: usize = 8000;
+/// Most files a lead can hand a member in one delegate or follow-up.
+const MAX_TASK_ATTACHMENTS: usize = 10;
 
 const INSTRUCTIONS: &str = "\
 You are the lead agent in Baton, a desktop workspace where several coding agents work together.
@@ -53,6 +55,7 @@ You can hand work to team members with the baton tools:
     one at a time, fix any conflicts merge_task reports, and discard_task the rest.
   - \"shared\": they run one at a time directly in the workspace.
 - Use wait to collect results, then check and integrate them before answering.
+- Files the user attached are listed after their message; pass the ones a member needs in delegate's attachments.
 - Delegating is the default: the user turned on agent mode to have the team do the work. Do a task yourself only
   when the whole request is a quick question or a one-line change.
 - The user can message a member directly; those messages come back to you as user_notes.
@@ -69,6 +72,10 @@ The user turned on agent mode: split the work across your team instead of doing 
 3. Use baton wait to collect results, review them (read the changed files), follow up or fix, then report back.
 Work alone only if the whole request is a quick question or a one-line change.
 ";
+
+/// Heads the list of a lead message's attachments. The UI strips it from
+/// replayed messages, so keep the two in sync (`cleanReplay` in store.ts).
+const ATTACHMENTS_NOTE: &str = "[Attached files — note from the app]";
 
 const SUBTASK_PREAMBLE: &str = "\
 [Baton] A lead agent assigned you the task below. Work in the current workspace. \
@@ -131,6 +138,8 @@ struct Task {
     notes: Vec<String>,
     cancel_requested: bool,
     sandbox: Option<Sandbox>,
+    /// Files sent with the next turn: the brief's, then each follow-up's own.
+    attachments: Vec<String>,
 }
 
 pub struct Orchestra {
@@ -244,7 +253,8 @@ impl Orchestra {
 
     /// The text to send for a user message: leads get the agent-mode note in front,
     /// naming the current team so a lead notices when the user switched it.
-    pub fn lead_prompt(&self, agent_id: &str, session_id: &str, text: &str) -> String {
+    /// `attachments` are listed after the text so the lead can pass them on.
+    pub fn lead_prompt(&self, agent_id: &str, session_id: &str, text: &str, attachments: &[String]) -> String {
         let team_id = self
             .leads
             .lock()
@@ -253,7 +263,7 @@ impl Orchestra {
             .find(|l| l.agent_id == agent_id && l.session_id.as_deref() == Some(session_id))
             .map(|l| l.team_id.clone());
         let team = team_id.map(|id| self.app.state::<Teams>().get(&id).name);
-        wrap_lead_text(text, team.as_deref())
+        wrap_lead_text(text, team.as_deref(), attachments)
     }
 
     /// Switch a lead's team; applies to its next delegations.
@@ -417,6 +427,7 @@ impl Orchestra {
             .map(str::to_owned)
             .unwrap_or_else(|| task_text.chars().take(40).collect());
         let writes = args.get("writes_files").and_then(Value::as_bool).unwrap_or(true);
+        let attachments = task_attachments(args)?;
         let lead_session_id = lead.session_id.clone().ok_or("lead session is not ready yet")?;
         let isolated =
             writes && team.isolation == "worktree" && worktree::repo_root(std::path::Path::new(&lead.cwd)).is_some();
@@ -453,6 +464,7 @@ impl Orchestra {
                 notes: Vec::new(),
                 cancel_requested: false,
                 sandbox: None,
+                attachments,
             },
         );
         self.emit_task(&id);
@@ -464,6 +476,7 @@ impl Orchestra {
         let id = args.get("task_id").and_then(Value::as_str).ok_or("task_id is required")?;
         let message = args.get("message").and_then(Value::as_str).ok_or("message is required")?;
         let writes = args.get("writes_files").and_then(Value::as_bool);
+        let attachments = task_attachments(args)?;
         let writes = {
             let tasks = self.tasks.lock().unwrap();
             let task = tasks.get(id).ok_or("unknown task")?;
@@ -478,6 +491,7 @@ impl Orchestra {
         if let Some(task) = self.tasks.lock().unwrap().get_mut(id) {
             task.cancel_requested = false;
             task.info.error = None;
+            task.attachments = attachments;
         }
         self.set_status(id, "queued");
         tauri::async_runtime::spawn(run_turn(self.app.clone(), token.to_string(), id.to_string(), message.to_string(), writes, false));
@@ -562,6 +576,8 @@ impl Orchestra {
             }
             task.sandbox.clone().ok_or("nothing to merge: the task has no worktree (shared, merged or discarded)")?
         };
+        // Shells first: on Windows a shell inside the worktree keeps it from being deleted.
+        self.close_terminals_under(sandbox.path.clone()).await;
         let label = format!("{id}-merge");
         let task_id = id.to_string();
         let sb = sandbox.clone();
@@ -597,6 +613,7 @@ impl Orchestra {
             task.sandbox.clone()
         };
         if let Some(sb) = sandbox {
+            self.close_terminals_under(sb.path.clone()).await;
             let _ = tokio::task::spawn_blocking(move || worktree::remove(&sb)).await;
         }
         if let Some(task) = self.tasks.lock().unwrap().get_mut(id) {
@@ -607,6 +624,13 @@ impl Orchestra {
         }
         self.emit_task(id);
         Ok(json!({ "task_id": id, "merge_state": "discarded" }))
+    }
+
+    /// End the 터미널 tab's shells left in a removed worktree. Off the async
+    /// runtime: closing a Windows pseudoconsole can wait on its output.
+    async fn close_terminals_under(&self, path: std::path::PathBuf) {
+        let app = self.app.clone();
+        let _ = tokio::task::spawn_blocking(move || app.state::<crate::terminal::Terminals>().close_under(&path)).await;
     }
 
     async fn call_tool(&self, token: &str, lead: &Lead, name: &str, args: &Value) -> Result<Value, String> {
@@ -653,10 +677,10 @@ async fn run_turn(app: AppHandle, token: String, task_id: String, message: Strin
         return;
     }
 
-    let (member, mut cwd, isolated) = {
+    let (member, mut cwd, isolated, attachments) = {
         let tasks = orch.tasks.lock().unwrap();
         let Some(t) = tasks.get(&task_id) else { return };
-        (t.member.clone(), t.cwd.clone(), t.info.isolated)
+        (t.member.clone(), t.cwd.clone(), t.info.isolated, t.attachments.clone())
     };
 
     if first {
@@ -707,10 +731,11 @@ async fn run_turn(app: AppHandle, token: String, task_id: String, message: Strin
                     "modes": session.get("modes"),
                 },
                 "brief": message,
+                "attachments": attachments,
             }),
         );
     } else if let Some(info) = orch.tasks.lock().unwrap().get(&task_id).map(|t| t.info.clone()) {
-        let _ = app.emit("task-brief", json!({ "task": info, "text": message }));
+        let _ = app.emit("task-brief", json!({ "task": info, "text": message, "attachments": attachments }));
     }
 
     // Tasks that change the shared workspace take turns; isolated ones have their own copy.
@@ -742,7 +767,8 @@ async fn run_turn(app: AppHandle, token: String, task_id: String, message: Strin
     orch.set_status(&task_id, "running");
 
     let prompt = if first { format!("{SUBTASK_PREAMBLE}\n\n{message}") } else { message };
-    let outcome = hub.prompt(&member.agent_id, &session_id, &prompt, &[]).await;
+    // Absolute paths, so they still resolve from a worktree task's copy of the workspace.
+    let outcome = hub.prompt(&member.agent_id, &session_id, &prompt, &attachments).await;
     let status = {
         let mut tasks = orch.tasks.lock().unwrap();
         let Some(t) = tasks.get_mut(&task_id) else { return };
@@ -777,17 +803,64 @@ async fn run_turn(app: AppHandle, token: String, task_id: String, message: Strin
     orch.set_status(&task_id, status);
 }
 
-/// A lead's user message with the agent-mode note in front; `team` is None
-/// for a session that isn't a lead.
-fn wrap_lead_text(text: &str, team: Option<&str>) -> String {
+/// A lead's user message with the agent-mode note in front and its
+/// attachments' paths after it; `team` is None for a session that isn't a lead.
+fn wrap_lead_text(text: &str, team: Option<&str>, attachments: &[String]) -> String {
     // A slash command (/compact, …) only works as the very start of the
     // message; anything in front turns it into plain text.
     match team {
-        Some(team) if !text.trim_start().starts_with('/') => format!(
-            "{LEAD_PREAMBLE}Current team: \"{team}\". If it differs from the team you last listed, call list_agents again.\n[User message]\n{text}"
-        ),
+        Some(team) if !text.trim_start().starts_with('/') => {
+            let mut out = format!(
+                "{LEAD_PREAMBLE}Current team: \"{team}\". If it differs from the team you last listed, call list_agents again.\n[User message]\n{text}"
+            );
+            if !attachments.is_empty() {
+                out.push_str(&format!(
+                    "\n\n{ATTACHMENTS_NOTE}\nThe user attached these files. To give them to a member, pass their paths in delegate's attachments.\n"
+                ));
+                for path in attachments {
+                    out.push_str(&format!("- {path}\n"));
+                }
+                out.pop();
+            }
+            out
+        }
         _ => text.to_string(),
     }
+}
+
+/// The `attachments` of a delegate or send_followup call: absolute paths of
+/// existing files, at most MAX_TASK_ATTACHMENTS. Missing or null means none.
+fn task_attachments(args: &Value) -> Result<Vec<String>, String> {
+    let list = match args.get("attachments") {
+        None | Some(Value::Null) => return Ok(Vec::new()),
+        Some(Value::Array(list)) => list,
+        Some(_) => return Err("attachments must be an array of absolute file paths".into()),
+    };
+    if list.len() > MAX_TASK_ATTACHMENTS {
+        return Err(format!(
+            "too many attachments ({}); pass at most {MAX_TASK_ATTACHMENTS} files per task",
+            list.len()
+        ));
+    }
+    list.iter()
+        .enumerate()
+        .map(|(i, v)| {
+            let path = v.as_str().ok_or_else(|| format!("attachments[{i}] must be a file path string"))?;
+            let p = std::path::Path::new(path);
+            if !p.is_absolute() {
+                return Err(format!(
+                    "attachment '{path}' is not an absolute path; use the full path (the user's attachments are listed after their message)"
+                ));
+            }
+            if p.is_dir() {
+                return Err(format!("attachment '{path}' is a folder; attach files only"));
+            }
+            if !p.is_file() {
+                return Err(format!("attachment '{path}' does not exist; check the path"));
+            }
+            Ok(path.to_string())
+        })
+        .collect()
 }
 
 /// Whether a member's agent program exists here (teams may list agents the
@@ -947,7 +1020,8 @@ fn tool_list() -> Value {
                     "member": { "type": "string", "description": "Member id from list_agents." },
                     "title": { "type": "string", "description": "Short title shown to the user (a few words)." },
                     "task": { "type": "string", "description": "Complete, self-contained instructions. The member cannot see your conversation." },
-                    "writes_files": { "type": "boolean", "description": "Whether the task modifies files. Read-only tasks run in parallel; writing tasks run one at a time. Default true." }
+                    "writes_files": { "type": "boolean", "description": "Whether the task modifies files. Read-only tasks run in parallel; writing tasks run one at a time. Default true." },
+                    "attachments": { "type": "array", "items": { "type": "string", "description": "Absolute file path." }, "description": "Files to give the member (e.g. images the user attached); images are shown to it directly." }
                 },
                 "required": ["member", "task"]
             }
@@ -977,7 +1051,8 @@ fn tool_list() -> Value {
                 "properties": {
                     "task_id": { "type": "string" },
                     "message": { "type": "string" },
-                    "writes_files": { "type": "boolean" }
+                    "writes_files": { "type": "boolean" },
+                    "attachments": { "type": "array", "items": { "type": "string", "description": "Absolute file path." }, "description": "Files to give the member (e.g. images the user attached); images are shown to it directly." }
                 },
                 "required": ["task_id", "message"]
             }
@@ -1061,17 +1136,61 @@ mod tests {
 
     #[test]
     fn lead_messages_get_the_agent_mode_note() {
-        let wrapped = wrap_lead_text("fix the login bug", Some("자동"));
+        let wrapped = wrap_lead_text("fix the login bug", Some("자동"), &[]);
         assert!(wrapped.starts_with(LEAD_PREAMBLE));
         assert!(wrapped.contains("Current team: \"자동\""));
         assert!(wrapped.ends_with("[User message]\nfix the login bug"));
+        assert!(!wrapped.contains(ATTACHMENTS_NOTE));
+    }
+
+    #[test]
+    fn lead_messages_list_their_attachments() {
+        let files = ["/Users/me/Shot 1.png".to_string(), "/Users/me/spec.md".to_string()];
+        let wrapped = wrap_lead_text("match this design", Some("자동"), &files);
+        assert!(wrapped.starts_with(LEAD_PREAMBLE));
+        let (before, after) = wrapped.split_once(&format!("\n\n{ATTACHMENTS_NOTE}\n")).unwrap();
+        assert!(before.ends_with("[User message]\nmatch this design"));
+        assert!(after.contains("delegate's attachments"));
+        assert!(after.ends_with("\n- /Users/me/Shot 1.png\n- /Users/me/spec.md"), "{after}");
     }
 
     #[test]
     fn slash_commands_and_plain_chats_pass_through() {
-        assert_eq!(wrap_lead_text("/compact", Some("자동")), "/compact");
-        assert_eq!(wrap_lead_text("  /compact keep the plan", Some("자동")), "  /compact keep the plan");
-        assert_eq!(wrap_lead_text("hello", None), "hello");
+        let files = ["/Users/me/Shot.png".to_string()];
+        assert_eq!(wrap_lead_text("/compact", Some("자동"), &[]), "/compact");
+        assert_eq!(wrap_lead_text("/compact", Some("자동"), &files), "/compact");
+        assert_eq!(wrap_lead_text("  /compact keep the plan", Some("자동"), &files), "  /compact keep the plan");
+        assert_eq!(wrap_lead_text("hello", None, &[]), "hello");
+        assert_eq!(wrap_lead_text("hello", None, &files), "hello");
+    }
+
+    #[test]
+    fn task_attachments_take_existing_absolute_files() {
+        let dir = std::env::temp_dir().join(format!("baton-task-attach-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("shot.png");
+        std::fs::write(&file, b"png").unwrap();
+        let file = file.display().to_string();
+        let dir_s = dir.display().to_string();
+        let missing = dir.join("gone.png").display().to_string();
+
+        assert_eq!(task_attachments(&json!({})), Ok(vec![]));
+        assert_eq!(task_attachments(&json!({ "attachments": null })), Ok(vec![]));
+        assert_eq!(task_attachments(&json!({ "attachments": [] })), Ok(vec![]));
+        assert_eq!(task_attachments(&json!({ "attachments": [file] })), Ok(vec![file.clone()]));
+
+        let err = |args: Value| task_attachments(&args).unwrap_err();
+        assert!(err(json!({ "attachments": file })).contains("must be an array"));
+        assert!(err(json!({ "attachments": [file, 3] })).contains("attachments[1] must be a file path"));
+        assert!(err(json!({ "attachments": ["shot.png"] })).contains("'shot.png' is not an absolute path"));
+        assert!(err(json!({ "attachments": [missing] })).contains("does not exist"));
+        assert!(err(json!({ "attachments": [dir_s] })).contains("is a folder"));
+        let ten = vec![file.clone(); MAX_TASK_ATTACHMENTS];
+        assert_eq!(task_attachments(&json!({ "attachments": ten })).map(|v| v.len()), Ok(MAX_TASK_ATTACHMENTS));
+        let eleven = vec![file.clone(); MAX_TASK_ATTACHMENTS + 1];
+        assert!(err(json!({ "attachments": eleven })).contains("too many attachments (11)"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1189,6 +1308,13 @@ mod tests {
         for tool in tools.as_array().unwrap() {
             assert_eq!(tool["inputSchema"]["type"], "object", "{}", tool["name"]);
             assert!(!tool["description"].as_str().unwrap().is_empty());
+        }
+        for name in ["delegate", "send_followup"] {
+            let tool = tools.as_array().unwrap().iter().find(|t| t["name"] == name).unwrap();
+            let schema = &tool["inputSchema"];
+            assert_eq!(schema["properties"]["attachments"]["type"], "array", "{name}");
+            assert_eq!(schema["properties"]["attachments"]["items"]["type"], "string", "{name}");
+            assert!(!schema["required"].as_array().unwrap().contains(&json!("attachments")), "{name}");
         }
     }
 }

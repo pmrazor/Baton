@@ -130,7 +130,7 @@ export type Action =
   | { type: "modeSwitched"; key: string; lead?: { teamId: string }; configOptions?: ConfigOption[] | null; note: string }
   | { type: "taskUpdate"; task: TaskInfo }
   | { type: "taskSession"; event: TaskSessionEvent }
-  | { type: "taskBrief"; task: TaskInfo; text: string }
+  | { type: "taskBrief"; task: TaskInfo; text: string; attachments?: string[] }
   | { type: "configOptions"; key: string; configOptions: ConfigOption[] }
   | { type: "mode"; key: string; modeId: string }
   | { type: "permissionAdd"; request: PermissionRequest }
@@ -381,7 +381,7 @@ export function reducer(state: State, action: Action): State {
     case "taskUpdate":
       return applyTask(state, action.task);
     case "taskSession": {
-      const { task, session, brief } = action.event;
+      const { task, session, brief, attachments } = action.event;
       const key = sessionKey(session.agentId, session.sessionId);
       if (state.sessions.some((s) => s.key === key)) return applyTask(state, task);
       const now = Date.now();
@@ -391,7 +391,9 @@ export function reducer(state: State, action: Action): State {
         sessionId: session.sessionId,
         cwd: session.cwd,
         title: task.title,
-        items: [{ kind: "brief", id: nextId(), text: brief, label: "총괄이 맡긴 작업", startedAt: now }],
+        items: [
+          { kind: "brief", id: nextId(), text: brief, label: "총괄이 맡긴 작업", startedAt: now, ...briefFiles(attachments) },
+        ],
         busy: false,
         configOptions: session.configOptions ?? [],
         modes: session.modes ?? null,
@@ -414,7 +416,14 @@ export function reducer(state: State, action: Action): State {
         updatedAt: Date.now(),
         items: [
           ...s.items,
-          { kind: "brief", id: nextId(), text: action.text, label: "총괄의 추가 지시", startedAt: Date.now() },
+          {
+            kind: "brief",
+            id: nextId(),
+            text: action.text,
+            label: "총괄의 추가 지시",
+            startedAt: Date.now(),
+            ...briefFiles(action.attachments),
+          },
         ],
       }));
     }
@@ -565,6 +574,14 @@ function upsertTool(items: ChatItem[], u: Partial<ToolCallFields> & { toolCallId
   return items.map((it, i) => (i === idx ? ({ ...it, ...patch } as ToolItem) : it));
 }
 
+/** A brief's `attachments` field, left out when the lead sent no files. */
+function briefFiles(paths: string[] | undefined): { attachments?: Attachment[] } {
+  return paths && paths.length > 0 ? { attachments: paths.map(attachmentOf) } : {};
+}
+
+/** Heads the attachment list Baton adds after a lead's message (ATTACHMENTS_NOTE in orchestra.rs). */
+const ATTACHMENTS_NOTE = "\n\n[Attached files — note from the app]";
+
 /**
  * Strip the notes Baton itself put in front of messages it sent (agent-mode
  * note, task preamble), which come back when a conversation is replayed.
@@ -576,6 +593,9 @@ function cleanReplay(items: ChatItem[]): ChatItem[] {
     if (text.startsWith("[Baton agent mode")) {
       const i = text.indexOf("[User message]\n");
       if (i >= 0) text = text.slice(i + "[User message]\n".length);
+      // The attached files come back as their own blocks.
+      const j = text.indexOf(ATTACHMENTS_NOTE);
+      if (j >= 0) text = text.slice(0, j);
     } else if (text.startsWith("[Baton] A lead agent")) {
       const i = text.indexOf("\n\n");
       if (i >= 0) text = text.slice(i + 2);

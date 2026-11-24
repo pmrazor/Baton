@@ -9,10 +9,12 @@ mod orchestra;
 mod profiles;
 mod shell_env;
 mod teams;
+mod terminal;
 pub mod usage;
 mod worktree;
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 
 use serde_json::{json, Value};
@@ -22,6 +24,7 @@ use hub::{AgentInfo, Hub, HubError, Launch};
 use orchestra::Orchestra;
 use profiles::{Profile, Profiles, DEFAULT_PROFILE};
 use teams::{Team, Teams};
+use terminal::Terminals;
 
 #[tauri::command]
 async fn list_agents(hub: State<'_, Hub>) -> Result<Vec<AgentInfo>, HubError> {
@@ -87,8 +90,9 @@ async fn send_prompt(
     text: String,
     attachments: Option<Vec<String>>,
 ) -> Result<Value, HubError> {
-    let text = orchestra.lead_prompt(&agent_id, &session_id, &text);
-    hub.prompt(&agent_id, &session_id, &text, &attachments.unwrap_or_default()).await
+    let attachments = attachments.unwrap_or_default();
+    let text = orchestra.lead_prompt(&agent_id, &session_id, &text, &attachments);
+    hub.prompt(&agent_id, &session_id, &text, &attachments).await
 }
 
 #[tauri::command]
@@ -238,6 +242,29 @@ async fn merge_task(orchestra: State<'_, Orchestra>, task_id: String) -> Result<
 #[tauri::command]
 async fn discard_task(orchestra: State<'_, Orchestra>, task_id: String) -> Result<Value, HubError> {
     orchestra.discard(&task_id).await.map_err(plain_error)
+}
+
+/// Leftover patches saved when worktrees were cleaned up.
+#[tauri::command]
+async fn list_unmerged(workspace: String) -> Result<Vec<worktree::UnmergedPatch>, String> {
+    tokio::task::spawn_blocking(move || worktree::list_unmerged(Path::new(&workspace)))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Apply a leftover patch to the working tree; it is deleted only if it applied cleanly.
+#[tauri::command]
+async fn apply_unmerged(workspace: String, file: String) -> Result<worktree::ApplyOutcome, String> {
+    tokio::task::spawn_blocking(move || worktree::apply_unmerged(Path::new(&workspace), &file))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn delete_unmerged(workspace: String, file: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || worktree::delete_unmerged(Path::new(&workspace), &file))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 /// Delete the agent's own copy of a conversation (when the agent supports it).
@@ -423,6 +450,7 @@ pub fn run() {
             app.manage(profiles);
             app.manage(Teams::load(&dir));
             app.manage(Orchestra::start(app.handle().clone())?);
+            app.manage(Terminals::default());
             // Dev aid: BATON_DEBUG_LEAD=<workspace> registers a lead with no
             // chat behind it and prints its MCP endpoint, for testing tools by hand.
             if let Ok(cwd) = std::env::var("BATON_DEBUG_LEAD") {
@@ -448,6 +476,9 @@ pub fn run() {
             missing_paths,
             delete_agent_session,
             discard_task,
+            list_unmerged,
+            apply_unmerged,
+            delete_unmerged,
             agent_options,
             list_teams,
             save_team,
@@ -472,7 +503,18 @@ pub fn run() {
             history::save_session,
             history::load_sessions,
             history::delete_session,
+            terminal::terminal_open,
+            terminal::terminal_write,
+            terminal::terminal_resize,
+            terminal::terminal_close,
+            terminal::terminal_list,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Baton");
+        .build(tauri::generate_context!())
+        .expect("error while running Baton")
+        .run(|app, event| {
+            // Shells in the terminal tab end with the app.
+            if let tauri::RunEvent::Exit = event {
+                app.state::<Terminals>().kill_all();
+            }
+        });
 }

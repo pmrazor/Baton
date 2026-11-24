@@ -168,7 +168,7 @@ export default function App() {
       onLog: (agentId, line) => dispatch({ type: "log", agentId, line }),
       onTask: (task) => dispatch({ type: "taskUpdate", task }),
       onTaskSession: (event) => dispatch({ type: "taskSession", event }),
-      onTaskBrief: (task, text) => dispatch({ type: "taskBrief", task, text }),
+      onTaskBrief: (task, text, attachments) => dispatch({ type: "taskBrief", task, text, attachments }),
       onAccountUsage: (agentId, profileId, usage) =>
         dispatch({ type: "accountUsage", agentId, profileId, quotas: quotasFromUsageReport(usage) }),
     }).then((off) => (disposed ? off() : (unlisten = off)));

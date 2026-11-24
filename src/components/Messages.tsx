@@ -147,6 +147,13 @@ export function ChatItemView({ item, isLast }: { item: ChatItem; isLast: boolean
             {item.label}
           </div>
           <Md text={item.text} />
+          {item.attachments && item.attachments.length > 0 && (
+            <div className="msg-attachments">
+              {item.attachments.map((a) => (
+                <AttachmentView key={a.path} a={a} large />
+              ))}
+            </div>
+          )}
         </div>
       );
   }

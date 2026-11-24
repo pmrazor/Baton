@@ -116,6 +116,20 @@
    "source": "npm"
   },
   {
+   "name": "@xterm/addon-fit",
+   "version": "0.11.0",
+   "license": "MIT",
+   "url": "https://github.com/xtermjs/xterm.js/tree/master/addons/addon-fit",
+   "source": "npm"
+  },
+  {
+   "name": "@xterm/xterm",
+   "version": "6.0.0",
+   "license": "MIT",
+   "url": "https://github.com/xtermjs/xterm.js",
+   "source": "npm"
+  },
+  {
    "name": "adler2",
    "version": "2.0.1",
    "license": "0BSD OR MIT OR Apache-2.0",
@@ -481,6 +495,13 @@
   },
   {
    "name": "cfg_aliases",
+   "version": "0.1.1",
+   "license": "MIT",
+   "url": "https://github.com/katharostech/cfg_aliases",
+   "source": "cargo"
+  },
+  {
+   "name": "cfg_aliases",
    "version": "0.2.2",
    "license": "MIT",
    "url": "https://github.com/katharostech/cfg_aliases",
@@ -830,6 +851,13 @@
    "source": "cargo"
   },
   {
+   "name": "downcast-rs",
+   "version": "1.2.1",
+   "license": "MIT/Apache-2.0",
+   "url": "https://github.com/marcianx/downcast-rs",
+   "source": "cargo"
+  },
+  {
    "name": "dpi",
    "version": "0.1.2",
    "license": "Apache-2.0 AND MIT",
@@ -967,6 +995,13 @@
    "version": "0.3.6",
    "license": "MIT OR Apache-2.0",
    "url": "https://github.com/Diggsey/rust-field-offset",
+   "source": "cargo"
+  },
+  {
+   "name": "filedescriptor",
+   "version": "0.8.3",
+   "license": "MIT",
+   "url": "https://github.com/wezterm/wezterm",
    "source": "cargo"
   },
   {
@@ -1719,6 +1754,13 @@
    "source": "cargo"
   },
   {
+   "name": "lazy_static",
+   "version": "1.5.1",
+   "license": "MIT OR Apache-2.0",
+   "url": "https://github.com/rust-lang-nursery/lazy-static.rs",
+   "source": "cargo"
+  },
+  {
    "name": "libappindicator",
    "version": "0.9.0",
    "license": "Apache-2.0 OR MIT",
@@ -2196,6 +2238,13 @@
   },
   {
    "name": "nix",
+   "version": "0.28.0",
+   "license": "MIT",
+   "url": "https://github.com/nix-rust/nix",
+   "source": "cargo"
+  },
+  {
+   "name": "nix",
    "version": "0.32.0",
    "license": "MIT",
    "url": "https://github.com/nix-rust/nix",
@@ -2570,6 +2619,13 @@
    "version": "0.2.8",
    "license": "Apache-2.0 OR MIT",
    "url": "https://github.com/taiki-e/portable-atomic-util",
+   "source": "cargo"
+  },
+  {
+   "name": "portable-pty",
+   "version": "0.9.0",
+   "license": "MIT",
+   "url": "https://github.com/wezterm/wezterm",
    "source": "cargo"
   },
   {
@@ -3049,6 +3105,13 @@
    "source": "cargo"
   },
   {
+   "name": "serial2",
+   "version": "0.2.39",
+   "license": "BSD-2-Clause OR Apache-2.0",
+   "url": "https://github.com/de-vri-es/serial2-rs",
+   "source": "cargo"
+  },
+  {
    "name": "serialize-to-javascript",
    "version": "0.1.2",
    "license": "MIT OR Apache-2.0",
@@ -3088,6 +3151,20 @@
    "version": "0.11.1",
    "license": "MIT OR Apache-2.0",
    "url": "https://github.com/RustCrypto/hashes",
+   "source": "cargo"
+  },
+  {
+   "name": "shared_library",
+   "version": "0.1.9",
+   "license": "Apache-2.0/MIT",
+   "url": "https://github.com/tomaka/shared_library/",
+   "source": "cargo"
+  },
+  {
+   "name": "shell-words",
+   "version": "1.1.1",
+   "license": "MIT/Apache-2.0",
+   "url": "https://github.com/tmiasko/shell-words",
    "source": "cargo"
   },
   {
@@ -4264,6 +4341,13 @@
    "version": "1.0.5",
    "license": "MIT",
    "url": "https://github.com/winnow-rs/winnow",
+   "source": "cargo"
+  },
+  {
+   "name": "winreg",
+   "version": "0.10.1",
+   "license": "MIT",
+   "url": "https://github.com/gentoo90/winreg-rs",
    "source": "cargo"
   },
   {

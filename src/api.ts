@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AgentInfo,
+  ApplyOutcome,
   AgentStatus,
   AuthStatus,
   ConfigOption,
@@ -12,6 +13,7 @@ import type {
   SessionModes,
   TaskInfo,
   Team,
+  UnmergedPatch,
 } from "./types";
 
 /** A session an agent has saved for a folder (ACP `session/list`). */
@@ -51,6 +53,10 @@ export const api = {
   resumeLeadSession: (agentId: string, sessionId: string, cwd: string, launch: Launch, teamId: string) =>
     invoke<Omit<NewSessionResult, "sessionId">>("resume_lead_session", { agentId, sessionId, cwd, launch, teamId }),
   taskNote: (taskId: string, text: string) => invoke<void>("task_note", { taskId, text }),
+  listUnmerged: (workspace: string) => invoke<UnmergedPatch[]>("list_unmerged", { workspace }),
+  applyUnmerged: (workspace: string, file: string) =>
+    invoke<ApplyOutcome>("apply_unmerged", { workspace, file }),
+  deleteUnmerged: (workspace: string, file: string) => invoke<void>("delete_unmerged", { workspace, file }),
   listAgentSessions: (cwd: string) => invoke<AgentSessionInfo[]>("list_agent_sessions", { cwd }),
   importSession: (agentId: string, sessionId: string, cwd: string, launch: Launch, teamId: string | null) =>
     invoke<ImportResult>("import_session", { agentId, sessionId, cwd, launch, teamId }),
@@ -102,7 +108,30 @@ export const api = {
   createProfile: (agentId: string, name: string) => invoke<Profile>("create_profile", { agentId, name }),
   renameProfile: (id: string, name: string) => invoke<void>("rename_profile", { id, name }),
   deleteProfile: (agentId: string, id: string) => invoke<void>("delete_profile", { agentId, id }),
+  /** Start a shell in `cwd`; false when `id` was already running (reattached). */
+  terminalOpen: (id: string, cwd: string, cols: number, rows: number) =>
+    invoke<boolean>("terminal_open", { id, cwd, cols, rows }),
+  terminalWrite: (id: string, data: string) => invoke<void>("terminal_write", { id, data }),
+  terminalResize: (id: string, cols: number, rows: number) => invoke<void>("terminal_resize", { id, cols, rows }),
+  terminalClose: (id: string) => invoke<void>("terminal_close", { id }),
+  /** The running shells, to find them again after a webview reload. */
+  terminalList: () => invoke<{ id: string; cwd: string }[]>("terminal_list"),
 };
+
+/** Terminal output (UTF-8 text) and shell exits, for every terminal. `gone`:
+ *  the shell was ended because its folder was removed. */
+export async function subscribeTerminals(
+  onOutput: (id: string, data: string) => void,
+  onExit: (id: string, code: number, gone: boolean) => void,
+): Promise<UnlistenFn> {
+  const offs = await Promise.all([
+    listen<{ id: string; data: string }>("terminal-output", (e) => onOutput(e.payload.id, e.payload.data)),
+    listen<{ id: string; code: number; gone?: boolean }>("terminal-exit", (e) =>
+      onExit(e.payload.id, e.payload.code, !!e.payload.gone),
+    ),
+  ]);
+  return () => offs.forEach((off) => off());
+}
 
 export function toHubError(e: unknown): HubError {
   if (e && typeof e === "object" && "message" in e) {
@@ -120,7 +149,8 @@ export interface HubEvents {
   onLog: (agentId: string, line: string) => void;
   onTask: (task: TaskInfo) => void;
   onTaskSession: (e: TaskSessionEvent) => void;
-  onTaskBrief: (task: TaskInfo, text: string) => void;
+  /** `attachments`: file paths the lead sent with the follow-up. */
+  onTaskBrief: (task: TaskInfo, text: string, attachments: string[]) => void;
   /** An account's plan limits, read with the agent's usage command (Antigravity). */
   onAccountUsage: (agentId: string, profileId: string, usage: unknown) => void;
 }
@@ -136,6 +166,8 @@ export interface TaskSessionEvent {
     modes: SessionModes | null;
   };
   brief: string;
+  /** File paths the lead attached to the task. */
+  attachments?: string[];
 }
 
 export async function subscribe(h: HubEvents): Promise<UnlistenFn> {
@@ -153,7 +185,9 @@ export async function subscribe(h: HubEvents): Promise<UnlistenFn> {
     listen<{ agentId: string; line: string }>("agent-log", (e) => h.onLog(e.payload.agentId, e.payload.line)),
     listen<TaskInfo>("task-update", (e) => h.onTask(e.payload)),
     listen<TaskSessionEvent>("task-session", (e) => h.onTaskSession(e.payload)),
-    listen<{ task: TaskInfo; text: string }>("task-brief", (e) => h.onTaskBrief(e.payload.task, e.payload.text)),
+    listen<{ task: TaskInfo; text: string; attachments?: string[] }>("task-brief", (e) =>
+      h.onTaskBrief(e.payload.task, e.payload.text, e.payload.attachments ?? []),
+    ),
     listen<{ agentId: string; profileId: string; usage: unknown }>("account-usage", (e) =>
       h.onAccountUsage(e.payload.agentId, e.payload.profileId, e.payload.usage),
     ),

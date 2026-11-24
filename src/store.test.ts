@@ -234,6 +234,32 @@ describe("agent mode tasks", () => {
     expect(session(state, "sub", "dsh").busy).toBe(false);
     expect(session(state, "lead").tasks?.[0].status).toBe("done");
   });
+
+  it("show the files the lead passed on under its brief", () => {
+    const event = {
+      task: task("a1-1", { sessionId: "sub", status: "running" }),
+      session: { agentId: "dsh", sessionId: "sub", cwd: "/wt", launch: {}, configOptions: null, modes: null },
+      brief: "Match this design",
+      attachments: ["/Users/me/Shot 1.png", "/Users/me/spec.md"],
+    };
+    let state = run(lead(), { type: "taskSession", event });
+    expect(session(state, "sub", "dsh").items[0]).toMatchObject({
+      kind: "brief",
+      text: "Match this design",
+      attachments: [attachmentOf("/Users/me/Shot 1.png"), attachmentOf("/Users/me/spec.md")],
+    });
+
+    state = run(
+      state,
+      { type: "taskUpdate", task: task("a1-1", { sessionId: "sub", status: "done" }) },
+      { type: "taskBrief", task: task("a1-1", { sessionId: "sub" }), text: "Now the dark theme", attachments: ["/Users/me/dark.png"] },
+      { type: "taskBrief", task: task("a1-1", { sessionId: "sub" }), text: "Thanks", attachments: [] },
+    );
+    const [, followup, plain] = session(state, "sub", "dsh").items;
+    expect(followup).toMatchObject({ kind: "brief", text: "Now the dark theme", attachments: [attachmentOf("/Users/me/dark.png")] });
+    expect(plain).toMatchObject({ kind: "brief", text: "Thanks" });
+    expect(plain).not.toHaveProperty("attachments");
+  });
 });
 
 describe("importing a conversation", () => {
@@ -263,6 +289,20 @@ describe("importing a conversation", () => {
     );
     const texts = session(state, "old").items.map((i) => ("text" in i ? i.text : ""));
     expect(texts).toEqual(["fix it", "ok", "write tests"]);
+  });
+
+  it("strips the attachment list Baton put after a lead message", () => {
+    const state = run(
+      initialState,
+      imported([
+        userChunk(
+          "[Baton agent mode — note from the app]\nsplit the work\n[User message]\nmatch this\n\n[Attached files — note from the app]\nThe user attached these files.\n- /Users/me/Shot.png",
+        ),
+        { sessionUpdate: "user_message_chunk", content: { type: "image", mimeType: "image/png", data: "x", uri: "file:///Users/me/Shot.png" } },
+      ]),
+    );
+    const [user] = session(state, "old").items;
+    expect(user).toMatchObject({ kind: "user", text: "match this", attachments: [attachmentOf("/Users/me/Shot.png")] });
   });
 
   it("shows replayed attachments as attachments", () => {

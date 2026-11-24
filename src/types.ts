@@ -141,7 +141,16 @@ export interface PlanEntry {
 export type ChatItem =
   | { kind: "user"; id: string; text: string; startedAt?: number; durationMs?: number; attachments?: Attachment[] }
   /** An instruction a lead agent gave this task (agent mode). Starts a turn like a user message. */
-  | { kind: "brief"; id: string; text: string; label: string; startedAt?: number; durationMs?: number }
+  | {
+      kind: "brief";
+      id: string;
+      text: string;
+      label: string;
+      startedAt?: number;
+      durationMs?: number;
+      /** Files the lead passed on with the instruction. */
+      attachments?: Attachment[];
+    }
   | { kind: "assistant"; id: string; text: string }
   | { kind: "thought"; id: string; text: string }
   | ({ kind: "tool"; id: string; toolKind: string } & Omit<ToolCallFields, "kind">)
@@ -304,3 +313,20 @@ export const AUTO_TEAM = "auto";
 /** Teams worth offering: the user's own, and built-in ones with a member that can run here. */
 export const usableTeams = (teams: Team[], agents: AgentInfo[]) =>
   teams.filter((t) => !t.builtin || t.members.some((m) => agents.some((a) => a.id === m.agentId && a.installed)));
+
+/** A leftover patch from a cleaned-up worktree (`.baton/unmerged`). */
+export interface UnmergedPatch {
+  file: string;
+  /** ms since the epoch. */
+  modified: number;
+  size: number;
+  /** Paths the patch changes. */
+  files: string[];
+}
+
+export interface ApplyOutcome {
+  applied: boolean;
+  /** Files left with conflict markers. */
+  conflicts: string[];
+  message: string;
+}

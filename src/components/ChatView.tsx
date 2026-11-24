@@ -1,4 +1,4 @@
-import { useEffect, useRef, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, useRef, type ReactNode } from "react";
 import { Download, FolderPlus } from "lucide-react";
 import { api } from "../api";
 import type { State } from "../store";
@@ -14,10 +14,14 @@ import {
   type Session,
 } from "../types";
 import Composer from "./Composer";
+import UnmergedBanner from "./UnmergedBanner";
 import { ToolRow } from "./Messages";
 import { groupTurns, TurnView } from "./Turn";
 import PermissionCard from "./PermissionCard";
 import { baseName } from "./Sidebar";
+
+// xterm is loaded only once a terminal is opened.
+const TerminalView = lazy(() => import("./TerminalView"));
 
 interface Props {
   state: State;
@@ -48,10 +52,11 @@ interface Props {
   onDiscardTask: (session: Session, taskId: string) => void;
 }
 
-export type Tab = "chat" | "activity" | "logs";
+export type Tab = "chat" | "terminal" | "activity" | "logs";
 
 const TABS = [
   ["chat", "대화"],
+  ["terminal", "터미널"],
   ["activity", "활동"],
   ["logs", "로그"],
 ] as const;
@@ -93,14 +98,19 @@ export function TitleBar({ state, session, className = "", onOpenSession }: BarP
   );
 }
 
-function TabBar({ session, tab, onTab }: { session: Session | null; tab: Tab; onTab: (tab: Tab) => void }) {
+function TabBar(p: { session: Session | null; cwd: string | null; tab: Tab; onTab: (tab: Tab) => void }) {
+  const { session, cwd, tab, onTab } = p;
+  const started = !!session && !session.draft;
+  // The terminal only needs a folder, so it works for a draft too (and then
+  // 대화 must stay clickable to get back).
+  const enabled = (id: Tab) => (id === "terminal" || id === "chat" ? started || !!cwd : started);
   return (
     <nav className="tab-bar">
       {TABS.map(([id, label]) => (
         <button
           key={id}
           className={tab === id ? "active" : ""}
-          disabled={!session || session.draft}
+          disabled={!enabled(id)}
           onClick={() => onTab(id)}
         >
           {label}
@@ -113,13 +123,15 @@ function TabBar({ session, tab, onTab }: { session: Session | null; tab: Tab; on
 export default function ChatView(p: Props) {
   const { state, session, tab } = p;
   const agentName = (id: string) => state.agents.find((a) => a.id === id)?.name ?? id;
+  const cwd = session?.cwd ?? state.workspace;
 
   return (
     <main className="main">
       {p.showTitle && <TitleBar state={state} session={session} onOpenSession={p.onOpenSession} />}
-      <TabBar session={session} tab={tab} onTab={p.onTab} />
+      <TabBar session={session} cwd={cwd} tab={tab} onTab={p.onTab} />
 
       {p.banner}
+      {state.workspace && <UnmergedBanner workspace={state.workspace} />}
       {session?.archived && (
         <div className="auth-banner archived-banner">
           <div>
@@ -145,7 +157,12 @@ export default function ChatView(p: Props) {
       )}
       {state.authPrompt && <AuthBanner {...p} agentName={agentName(state.authPrompt.agentId)} />}
 
-      {state.agents.length > 0 && installedAgents(state.agents).length === 0 ? (
+      {tab === "terminal" && cwd ? (
+        // Without the composer, so keys go to the shell.
+        <Suspense fallback={<div className="terminal-view" />}>
+          <TerminalView cwd={cwd} />
+        </Suspense>
+      ) : state.agents.length > 0 && installedAgents(state.agents).length === 0 ? (
         <div className="welcome">
           <h1>에이전트를 하나 설치해 주세요</h1>
           <p className="muted">Baton은 이 컴퓨터에 설치된 코딩 에이전트와 대화해요. 아직 찾은 에이전트가 없어요.</p>

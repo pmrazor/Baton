@@ -371,6 +371,126 @@ fn save_patch(sb: &Sandbox) -> Option<PathBuf> {
     Some(file)
 }
 
+/// A leftover patch saved by `save_patch`, for the UI to list.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct UnmergedPatch {
+    pub file: String,
+    /// Milliseconds since the epoch.
+    pub modified: u64,
+    pub size: u64,
+    /// Paths the patch changes.
+    pub files: Vec<String>,
+}
+
+#[derive(Debug, Default, serde::Serialize)]
+pub struct ApplyOutcome {
+    pub applied: bool,
+    /// Files left with conflict markers.
+    pub conflicts: Vec<String>,
+    pub message: String,
+}
+
+/// `<root>/.baton/unmerged`, without creating it.
+fn unmerged_dir(workspace: &Path) -> Option<PathBuf> {
+    Some(repo_root(workspace)?.join(".baton").join("unmerged"))
+}
+
+/// The patch's path, only for a plain `*.patch` file name inside `unmerged_dir`.
+fn patch_path(workspace: &Path, file: &str) -> Result<PathBuf, String> {
+    let plain = !file.is_empty() && !file.contains(['/', '\\']) && !file.contains("..");
+    if !plain || !file.ends_with(".patch") {
+        return Err(format!("올바르지 않은 파일 이름이에요: {file}"));
+    }
+    let path = unmerged_dir(workspace).ok_or("git 저장소가 아니에요")?.join(file);
+    if path.is_file() { Ok(path) } else { Err(format!("패치 파일이 없어요: {file}")) }
+}
+
+/// Leftover patches in the workspace's repository, newest first.
+pub fn list_unmerged(workspace: &Path) -> Vec<UnmergedPatch> {
+    let Some(root) = repo_root(workspace) else { return Vec::new() };
+    let Some(dir) = unmerged_dir(workspace) else { return Vec::new() };
+    let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
+    let mut out: Vec<UnmergedPatch> = entries
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".patch"))
+        .filter_map(|e| {
+            let meta = e.metadata().ok().filter(|m| m.is_file())?;
+            let modified = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_millis() as u64);
+            // `-z` prints paths verbatim: "added\tdeleted\tpath\0".
+            let numstat = run(git(&root).args(["apply", "--numstat", "-z"]).arg(e.path())).unwrap_or_default();
+            let files = String::from_utf8_lossy(&numstat)
+                .split('\0')
+                .filter_map(|l| l.splitn(3, '\t').nth(2))
+                .map(str::to_string)
+                .collect();
+            Some(UnmergedPatch { file: e.file_name().to_string_lossy().to_string(), modified, size: meta.len(), files })
+        })
+        .collect();
+    out.sort_by_key(|p| std::cmp::Reverse(p.modified));
+    out
+}
+
+/// `git apply --3way` against a throwaway index that matches the working
+/// tree (it refuses to run when the two differ), so the user's own index is
+/// never touched. The temp index is removed on every path out.
+fn three_way(root: &Path, patch: &Path) -> Result<std::process::Output, String> {
+    static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let index = std::env::temp_dir().join(format!("baton-index-{}-apply{seq}", std::process::id()));
+    let _ = std::fs::remove_file(&index);
+    let result = (|| {
+        let with_index = |args: &[&str]| {
+            let mut cmd = git(root);
+            cmd.env("GIT_INDEX_FILE", &index).args(args);
+            cmd
+        };
+        let has_head = run_text(git(root).args(["rev-parse", "--verify", "-q", "HEAD"])).is_ok();
+        run(&mut with_index(&["read-tree", if has_head { "HEAD" } else { "--empty" }]))?;
+        run(&mut with_index(&["add", "-A", "--", "."]))?;
+        with_index(&["apply", "--3way"])
+            .arg(patch)
+            .output()
+            .map_err(|e| format!("git를 실행하지 못했어요: {e}"))
+    })();
+    let _ = std::fs::remove_file(&index);
+    result
+}
+
+/// Apply a leftover patch to the working tree. Plain first; if the files have
+/// moved on, a 3-way merge that may leave conflict markers. The patch is
+/// deleted only after a clean apply.
+pub fn apply_unmerged(workspace: &Path, file: &str) -> Result<ApplyOutcome, String> {
+    let path = patch_path(workspace, file)?;
+    let root = repo_root(workspace).ok_or("git 저장소가 아니에요")?;
+    let io = |e: std::io::Error| format!("git를 실행하지 못했어요: {e}");
+    if git(&root).arg("apply").arg(&path).output().map_err(io)?.status.success() {
+        let _ = std::fs::remove_file(&path);
+        return Ok(ApplyOutcome { applied: true, message: "그대로 적용했어요".into(), ..Default::default() });
+    }
+    let out = three_way(&root, &path)?;
+    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    if out.status.success() {
+        let _ = std::fs::remove_file(&path);
+        return Ok(ApplyOutcome { applied: true, message: "변경된 부분을 합쳐서 적용했어요".into(), ..Default::default() });
+    }
+    // "Applied patch to 'x' with conflicts." for each file left with markers.
+    let conflicts: Vec<String> = stderr
+        .lines()
+        .filter_map(|l| l.strip_prefix("Applied patch to '")?.strip_suffix("' with conflicts."))
+        .map(str::to_string)
+        .collect();
+    let message = if conflicts.is_empty() { stderr } else { "충돌이 있어요".into() };
+    Ok(ApplyOutcome { applied: false, conflicts, message })
+}
+
+pub fn delete_unmerged(workspace: &Path, file: &str) -> Result<(), String> {
+    std::fs::remove_file(patch_path(workspace, file)?).map_err(|e| e.to_string())
+}
+
 fn unlink(sb: &Sandbox) {
     for dir in &sb.linked {
         let link = sb.path.join(dir);
@@ -387,6 +507,95 @@ mod tests {
 
     fn sh(dir: &Path, args: &[&str]) {
         assert!(Command::new("git").arg("-C").arg(dir).args(args).status().unwrap().success());
+    }
+
+    fn patch_repo(name: &str) -> (PathBuf, PathBuf) {
+        let repo = std::env::temp_dir().join(format!("baton-unmerged-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir_all(&repo).unwrap();
+        sh(&repo, &["init", "-q"]);
+        sh(&repo, &["config", "core.autocrlf", "false"]);
+        std::fs::write(repo.join("a.txt"), "one\ntwo\nthree\nf4\nf5\nf6\nf7\nf8\n").unwrap();
+        sh(&repo, &["add", "."]);
+        let commit = |msg: &str| sh(&repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", msg]);
+        commit("init");
+        // The patch: a.txt line 2 -> TWO, plus a new file.
+        std::fs::write(repo.join("a.txt"), "one\nTWO\nthree\nf4\nf5\nf6\nf7\nf8\n").unwrap();
+        std::fs::write(repo.join("n.txt"), "new\n").unwrap();
+        sh(&repo, &["add", "."]);
+        commit("task");
+        let diff = run(git(&repo).args(["diff", "--binary", "HEAD~1", "HEAD"])).unwrap();
+        sh(&repo, &["reset", "-q", "--hard", "HEAD~1"]);
+        let dir = crate::history::baton_subdir(&repo, "unmerged").unwrap();
+        std::fs::write(dir.join("t1.patch"), diff).unwrap();
+        (repo, dir.join("t1.patch"))
+    }
+
+    #[test]
+    fn unmerged_patch_lists_and_applies_cleanly() {
+        let (repo, patch) = patch_repo("clean");
+        let list = list_unmerged(&repo);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].file, "t1.patch");
+        assert!(list[0].size > 0 && list[0].modified > 0);
+        let mut files = list[0].files.clone();
+        files.sort();
+        assert_eq!(files, vec!["a.txt", "n.txt"]);
+
+        let out = apply_unmerged(&repo, "t1.patch").unwrap();
+        assert!(out.applied && out.conflicts.is_empty());
+        assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap(), "one\nTWO\nthree\nf4\nf5\nf6\nf7\nf8\n");
+        assert!(repo.join("n.txt").exists());
+        assert!(!patch.exists());
+        assert!(list_unmerged(&repo).is_empty());
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn unmerged_patch_falls_back_to_three_way_and_keeps_patch_on_conflict() {
+        let (repo, patch) = patch_repo("conflict");
+        // An uncommitted edit: the 3-way merge must still run, without staging anything.
+        std::fs::write(repo.join("a.txt"), "one\nother\nthree\nf4\nf5\nf6\nf7\nf8\n").unwrap();
+        let out = apply_unmerged(&repo, "t1.patch").unwrap();
+        assert!(!out.applied);
+        assert_eq!(out.conflicts, vec!["a.txt"]);
+        assert!(std::fs::read_to_string(repo.join("a.txt")).unwrap().contains("<<<<<<<"));
+        assert!(patch.exists(), "a conflicted patch must be kept");
+        sh(&repo, &["diff", "--cached", "--quiet"]);
+        // Neither method works (no repo history for the blobs): the error is returned, patch kept.
+        std::fs::write(&patch, "garbage\n").unwrap();
+        let out = apply_unmerged(&repo, "t1.patch").unwrap();
+        assert!(!out.applied && out.conflicts.is_empty() && !out.message.is_empty());
+        assert!(patch.exists());
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn unmerged_patch_merges_around_unrelated_uncommitted_edits() {
+        let (repo, patch) = patch_repo("merge");
+        std::fs::write(repo.join("a.txt"), "one\ntwo\nthree\nf4\nf5\nf6\nf7\nEIGHT\n").unwrap();
+        let out = apply_unmerged(&repo, "t1.patch").unwrap();
+        assert!(out.applied && out.conflicts.is_empty(), "{}", out.message);
+        assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap(), "one\nTWO\nthree\nf4\nf5\nf6\nf7\nEIGHT\n");
+        assert!(!patch.exists());
+        sh(&repo, &["diff", "--cached", "--quiet"]);
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn unmerged_patch_delete_and_bad_names() {
+        let (repo, patch) = patch_repo("names");
+        for bad in ["", "../t1.patch", "a/t1.patch", "a\\t1.patch", "t1.txt", "..patch", ".patch/.."] {
+            assert!(apply_unmerged(&repo, bad).is_err(), "{bad}");
+            assert!(delete_unmerged(&repo, bad).is_err(), "{bad}");
+        }
+        assert!(patch.exists());
+        assert!(delete_unmerged(&repo, "missing.patch").is_err());
+        delete_unmerged(&repo, "t1.patch").unwrap();
+        assert!(!patch.exists());
+        // Not a git repo: empty list.
+        assert!(list_unmerged(&std::env::temp_dir().join("baton-no-such-dir")).is_empty());
+        let _ = std::fs::remove_dir_all(&repo);
     }
 
     #[test]
