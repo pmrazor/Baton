@@ -65,9 +65,14 @@ export const api = {
   deleteTeam: (id: string) => invoke<void>("delete_team", { id }),
   resumeSession: (agentId: string, sessionId: string, cwd: string, launch: Launch) =>
     invoke<Omit<NewSessionResult, "sessionId">>("resume_session", { agentId, sessionId, cwd, launch }),
-  saveSession: (key: string, data: unknown) => invoke<void>("save_session", { key, data }),
-  loadSessions: () => invoke<unknown[]>("load_sessions"),
-  deleteSession: (key: string) => invoke<void>("delete_session", { key }),
+  /** Conversations live in `<workspace>/.baton/sessions`. */
+  saveSession: (workspace: string, key: string, data: unknown) =>
+    invoke<void>("save_session", { workspace, key, data }),
+  loadSessions: (workspaces: string[]) => invoke<unknown[]>("load_sessions", { workspaces }),
+  deleteSession: (workspace: string, key: string) => invoke<void>("delete_session", { workspace, key }),
+  /** Remove the agent's own copy (true if the agent supports deleting). */
+  deleteAgentSession: (agentId: string, sessionId: string, cwd: string, launch: Launch) =>
+    invoke<boolean>("delete_agent_session", { agentId, sessionId, cwd, launch }),
   sendPrompt: (agentId: string, sessionId: string, text: string) =>
     invoke<{
       stopReason: string;

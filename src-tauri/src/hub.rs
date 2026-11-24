@@ -456,6 +456,32 @@ impl Hub {
         self.resume_session(agent_id, session_id, &home.cwd, &home.launch, mcp_servers, meta).await
     }
 
+    /// Delete the agent's own record of a session (ACP `session/delete`), so
+    /// it doesn't come back through "import". Returns false when the agent
+    /// can't delete sessions (its record then stays with the agent).
+    pub async fn delete_agent_session(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        cwd: &str,
+        launch: &Launch,
+    ) -> Result<bool, HubError> {
+        let home = self.homes.lock().unwrap().get(&(agent_id.to_string(), session_id.to_string())).cloned();
+        let (_, rt) = match &home {
+            Some(h) => self.runtime(agent_id, &h.cwd, &h.launch).await?,
+            None => self.runtime(agent_id, cwd, launch).await?,
+        };
+        if rt.init.pointer("/agentCapabilities/sessionCapabilities/delete").is_none() {
+            return Ok(false);
+        }
+        if rt.active_sessions.lock().unwrap().remove(session_id) {
+            let _ = rt.conn.request("session/close", json!({ "sessionId": session_id })).await;
+        }
+        self.homes.lock().unwrap().remove(&(agent_id.to_string(), session_id.to_string()));
+        rt.conn.request("session/delete", json!({ "sessionId": session_id })).await?;
+        Ok(true)
+    }
+
     /// Hold back a loading session's replay from the UI; true if captured.
     fn capture(&self, agent_id: &str, session_id: &str, update: &Value) -> bool {
         match self.captures.lock().unwrap().get_mut(&(agent_id.to_string(), session_id.to_string())) {

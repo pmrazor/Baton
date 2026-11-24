@@ -217,6 +217,18 @@ async fn discard_task(orchestra: State<'_, Orchestra>, task_id: String) -> Resul
     orchestra.discard(&task_id).await.map_err(plain_error)
 }
 
+/// Delete the agent's own copy of a conversation (when the agent supports it).
+#[tauri::command]
+async fn delete_agent_session(
+    hub: State<'_, Hub>,
+    agent_id: String,
+    session_id: String,
+    cwd: String,
+    launch: Option<Launch>,
+) -> Result<bool, HubError> {
+    hub.delete_agent_session(&agent_id, &session_id, &cwd, &launch.unwrap_or_default()).await
+}
+
 /// Which of these folders no longer exist (deleted, renamed, drive unplugged).
 #[tauri::command]
 fn missing_paths(paths: Vec<String>) -> Vec<String> {
@@ -411,6 +423,7 @@ pub fn run() {
             switch_mode,
             merge_task,
             missing_paths,
+            delete_agent_session,
             discard_task,
             agent_options,
             list_teams,

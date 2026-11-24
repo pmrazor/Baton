@@ -59,6 +59,15 @@ function fromSaved(v: any): Session | null {
   };
 }
 
+/**
+ * The workspace whose `.baton` holds a conversation: its own folder, or for a
+ * delegated task (which runs in a temporary worktree) its lead's folder.
+ */
+function homeOf(s: Session, sessions: Session[]): string | null {
+  if (!s.parent) return s.cwd;
+  return sessions.find((l) => l.key === s.parent!.key)?.cwd ?? null;
+}
+
 function read<T>(key: string, fallback: T): T {
   try {
     const raw = localStorage.getItem(key);
@@ -118,7 +127,7 @@ export default function App() {
     api.listTeams().then((teams) => dispatch({ type: "teams", teams }));
 
     api
-      .loadSessions()
+      .loadSessions(init().workspaces)
       .then((raw) => {
         const sessions = raw.map(fromSaved).filter((s): s is Session => s !== null);
         sessions.sort((a, b) => a.updatedAt - b.updatedAt);
@@ -166,16 +175,25 @@ export default function App() {
     const timer = setTimeout(() => {
       for (const s of state.sessions) {
         if (s.draft || saved.current.get(s.key) === s) continue;
+        const home = homeOf(s, state.sessions);
+        // No folder to write into (deleted project, or a task whose lead is gone).
+        if (!home || state.missing.includes(home)) continue;
         saved.current.set(s.key, s);
-        api.saveSession(s.key, toSaved(s)).catch((e) => console.error("대화 저장 실패", e));
+        api.saveSession(home, s.key, toSaved(s)).catch((e) => console.error("대화 저장 실패", e));
       }
     }, 800);
     return () => clearTimeout(timer);
-  }, [state.sessions, historyLoaded]);
+  }, [state.sessions, state.missing, historyLoaded]);
 
   const addWorkspace = useCallback(async () => {
     const dir = await open({ directory: true, multiple: false, title: "워크스페이스 폴더 선택" });
-    if (typeof dir === "string") dispatch({ type: "workspaceAdd", path: dir });
+    if (typeof dir !== "string") return;
+    dispatch({ type: "workspaceAdd", path: dir });
+    // Bring in the history this folder already carries in its .baton.
+    const raw = await api.loadSessions([dir]).catch(() => [] as unknown[]);
+    const sessions = raw.map(fromSaved).filter((s): s is Session => s !== null);
+    sessions.forEach((s) => saved.current.set(s.key, s));
+    if (sessions.length) dispatch({ type: "restore", sessions, activeKey: null });
   }, []);
 
   /**
@@ -372,7 +390,8 @@ export default function App() {
             modes: res.modes ?? null,
           });
           saved.current.delete(s.key);
-          api.deleteSession(s.key).catch(() => {});
+          const home = homeOf(s, state.sessions);
+          if (home) api.deleteSession(home, s.key).catch(() => {});
           dispatch({
             type: "notice",
             key: sessionKey(s.agentId, res.sessionId),
@@ -391,16 +410,23 @@ export default function App() {
   const deleteSession = useCallback(
     async (key: string) => {
       // A lead's task chats go with it.
-      const children = state.sessions.filter((s) => s.parent?.key === key).map((s) => s.key);
-      const message = children.length
-        ? `이 대화와 하위 작업 ${children.length}개를 삭제할까요? 되돌릴 수 없어요.`
-        : "이 대화를 삭제할까요? 되돌릴 수 없어요.";
+      const target = state.sessions.find((s) => s.key === key);
+      if (!target) return;
+      const children = state.sessions.filter((s) => s.parent?.key === key);
+      const message =
+        (children.length
+          ? `이 대화와 하위 작업 ${children.length}개를 삭제할까요?`
+          : "이 대화를 삭제할까요?") + " Baton과 에이전트 쪽 기록이 모두 지워지고 되돌릴 수 없어요.";
       const ok = await ask(message, { title: "대화 삭제", kind: "warning" });
       if (!ok) return;
-      for (const k of [key, ...children]) {
-        dispatch({ type: "closeSession", key: k });
-        saved.current.delete(k);
-        api.deleteSession(k).catch((e) => console.error("대화 삭제 실패", e));
+      // Resolve folders before the lead leaves the state.
+      const doomed = [target, ...children].map((s) => ({ s, home: homeOf(s, state.sessions) }));
+      for (const { s, home } of doomed) {
+        dispatch({ type: "closeSession", key: s.key });
+        saved.current.delete(s.key);
+        if (home) api.deleteSession(home, s.key).catch((e) => console.error("대화 삭제 실패", e));
+        // Otherwise "import previous chats" would bring it right back.
+        api.deleteAgentSession(s.agentId, s.sessionId, s.cwd, s.launch).catch(() => {});
       }
     },
     [state.sessions],

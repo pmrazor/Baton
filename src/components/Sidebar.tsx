@@ -121,7 +121,11 @@ export default function Sidebar(p: Props) {
                   <button className="icon-btn sm" title="이전 대화 가져오기" onClick={() => p.onImport(ws)}>
                     <History size={14} />
                   </button>
-                  <button className="icon-btn sm" title="목록에서 제거" onClick={() => p.onRemoveWorkspace(ws)}>
+                  <button
+                    className="icon-btn sm"
+                    title="목록에서 빼기 (대화 기록은 이 폴더의 .baton에 남아요)"
+                    onClick={() => p.onRemoveWorkspace(ws)}
+                  >
                     <X size={14} />
                   </button>
                 </span>

@@ -98,6 +98,13 @@ async fn main() {
         conn.kill();
         return;
     }
+    // SMOKE_DELETE=<sessionId> deletes the agent's record of a session and exits.
+    if let Ok(id) = std::env::var("SMOKE_DELETE") {
+        let res = conn.request("session/delete", json!({ "sessionId": id })).await;
+        println!("session/delete → {}", if res.is_ok() { "ok".to_string() } else { format!("{res:?}") });
+        conn.kill();
+        return;
+    }
     // SMOKE_LOAD=<sessionId> replays a session with session/load and exits.
     if let Ok(id) = std::env::var("SMOKE_LOAD") {
         let res = conn.request("session/load", json!({ "sessionId": id, "cwd": cwd, "mcpServers": [] })).await;
