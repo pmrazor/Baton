@@ -4,6 +4,7 @@ import { api, subscribe, toHubError } from "./api";
 import { initialState, reducer, type State } from "./store";
 import {
   AUTO_TEAM,
+  DEFAULT_PROFILE,
   installedAgents,
   isTaskActive,
   profileOf,
@@ -12,6 +13,7 @@ import {
   type Launch,
   type Session,
 } from "./types";
+import { HANDOFF_BRIEF_LABEL, handoffMemo, isLimitError } from "./handoff";
 import Sidebar from "./components/Sidebar";
 import ChatView, { TitleBar, type Tab } from "./components/ChatView";
 import SettingsModal, { type SettingsTab } from "./components/SettingsModal";
@@ -41,6 +43,7 @@ function toSaved({
   draft: _draft,
   attachError: _attachError,
   archived: _archived,
+  limited: _limited,
   ...rest
 }: Session) {
   return rest;
@@ -215,23 +218,33 @@ export default function App() {
     if (sessions.length) dispatch({ type: "restore", sessions, activeKey: null });
   }, []);
 
+  type PromptTarget = Pick<Session, "key" | "agentId" | "sessionId" | "launch" | "lead" | "parent">;
+
   /**
    * Open a draft chat right away so the model can be picked before the first message.
    * In agent mode the draft is a lead session wired to the chosen team.
    */
   const newChat = useCallback(
-    async (workspace?: string, agentId?: string, launchOverride?: Launch, opts?: { lead?: boolean; team?: string }) => {
+    async (
+      workspace?: string,
+      agentId?: string,
+      launchOverride?: Launch,
+      opts?: { lead?: boolean; team?: string },
+    ): Promise<PromptTarget | null> => {
       const lead = opts?.lead ?? agentMode;
       const team = opts?.team ?? teamId;
       const ws = workspace ?? state.workspace;
-      if (!ws) return addWorkspace();
+      if (!ws) {
+        await addWorkspace();
+        return null;
+      }
       if (state.missing.includes(ws)) {
         const agentForPrompt = agentId ?? installedAgents(state.agents)[0]?.id ?? "";
         dispatch({
           type: "authPrompt",
           prompt: { agentId: agentForPrompt, profileId: "default", message: `작업 폴더를 찾을 수 없어요: ${ws}`, methods: [] },
         });
-        return;
+        return null;
       }
       // The last used agent, unless it has since been uninstalled.
       const usable = installedAgents(state.agents);
@@ -239,9 +252,9 @@ export default function App() {
       const agent = agentId ?? usable.find((a) => a.id === remembered)?.id ?? usable[0]?.id;
       if (!agent) {
         if (state.agents.length > 0) setSettingsTab("agents");
-        return;
+        return null;
       }
-      if (creating.current) return;
+      if (creating.current) return null;
       // Launch choices (permission, account, …) are remembered per agent for the next new chat.
       const launch = { ...read<Launch>(`${STORE.launch}.${agent}`, {}), ...launchOverride };
 
@@ -253,6 +266,7 @@ export default function App() {
         const res = lead ? await api.newLeadSession(agent, ws, launch, team) : await api.newSession(agent, ws, launch);
         write(STORE.agent, agent);
         write(`${STORE.launch}.${agent}`, launch);
+        const leadMeta = lead ? { teamId: team } : undefined;
         dispatch({
           type: "sessionCreated",
           agentId: agent,
@@ -262,8 +276,15 @@ export default function App() {
           launch,
           configOptions: res.configOptions ?? [],
           modes: res.modes ?? null,
-          lead: lead ? { teamId: team } : undefined,
+          lead: leadMeta,
         });
+        return {
+          key: sessionKey(agent, res.sessionId),
+          agentId: agent,
+          sessionId: res.sessionId,
+          launch,
+          lead: leadMeta,
+        };
       } catch (e) {
         const err = toHubError(e);
         dispatch({
@@ -275,6 +296,7 @@ export default function App() {
             methods: err.authRequired ? (err.authMethods ?? []) : [],
           },
         });
+        return null;
       } finally {
         creating.current = false;
         setConnecting(null);
@@ -464,50 +486,88 @@ export default function App() {
     [state.sessions],
   );
 
-  const sendPrompt = useCallback(async (session: Session, text: string, attachments: Attachment[] = []) => {
-    const { key, agentId, sessionId } = session;
-    const profileId = profileOf(session.launch);
-    // A message typed into a delegated task also reaches its lead.
-    if (session.parent) {
-      const files = attachments.length ? `\n(첨부: ${attachments.map((a) => a.path).join(", ")})` : "";
-      api.taskNote(session.parent.taskId, text + files).catch(() => {});
-    }
-    dispatch({ type: "userMessage", key, text, attachments });
-    dispatch({ type: "busy", key, busy: true });
-    const started = performance.now();
-    try {
-      const res = await api.sendPrompt(
-        agentId,
-        sessionId,
-        text,
-        attachments.map((a) => a.path),
-      );
-      dispatch({
-        type: "turnDone",
-        key,
-        stats: {
-          durationMs: performance.now() - started,
-          inputTokens: res.usage?.inputTokens,
-          outputTokens: res.usage?.outputTokens,
-          cachedReadTokens: res.usage?.cachedReadTokens,
-        },
-      });
-      if (res.stopReason === "cancelled") dispatch({ type: "notice", key, text: "중단됨", tone: "info" });
-      else if (res.stopReason === "refusal") dispatch({ type: "notice", key, text: "에이전트가 요청을 거절했습니다", tone: "error" });
-      else if (res.stopReason !== "end_turn") dispatch({ type: "notice", key, text: `종료: ${res.stopReason}`, tone: "info" });
-    } catch (e) {
-      const err = toHubError(e);
-      dispatch({ type: "notice", key, text: err.message, tone: "error" });
-      if (err.authRequired) {
-        dispatch({
-          type: "authPrompt",
-          prompt: { agentId, profileId, message: "로그인이 필요합니다.", methods: err.authMethods ?? [] },
-        });
+  const sendPrompt = useCallback(
+    async (session: PromptTarget, text: string, attachments: Attachment[] = [], briefLabel?: string) => {
+      const { key, agentId, sessionId } = session;
+      const profileId = profileOf(session.launch);
+      // A message typed into a delegated task also reaches its lead.
+      if (session.parent) {
+        const files = attachments.length ? `\n(첨부: ${attachments.map((a) => a.path).join(", ")})` : "";
+        api.taskNote(session.parent.taskId, text + files).catch(() => {});
       }
-    } finally {
-      dispatch({ type: "busy", key, busy: false });
-    }
-  }, []);
+      dispatch({ type: "userMessage", key, text, attachments, briefLabel });
+      dispatch({ type: "busy", key, busy: true });
+      const started = performance.now();
+      try {
+        const res = await api.sendPrompt(
+          agentId,
+          sessionId,
+          text,
+          attachments.map((a) => a.path),
+        );
+        dispatch({
+          type: "turnDone",
+          key,
+          stats: {
+            durationMs: performance.now() - started,
+            inputTokens: res.usage?.inputTokens,
+            outputTokens: res.usage?.outputTokens,
+            cachedReadTokens: res.usage?.cachedReadTokens,
+          },
+        });
+        if (res.stopReason === "cancelled") dispatch({ type: "notice", key, text: "중단됨", tone: "info" });
+        else if (res.stopReason === "refusal") dispatch({ type: "notice", key, text: "에이전트가 요청을 거절했습니다", tone: "error" });
+        else if (res.stopReason !== "end_turn") dispatch({ type: "notice", key, text: `종료: ${res.stopReason}`, tone: "info" });
+      } catch (e) {
+        const err = toHubError(e);
+        dispatch({ type: "notice", key, text: err.message, tone: "error" });
+        if (session.lead && isLimitError(err.message)) {
+          dispatch({ type: "sessionLimited", key });
+        }
+        if (err.authRequired) {
+          dispatch({
+            type: "authPrompt",
+            prompt: { agentId, profileId, message: "로그인이 필요합니다.", methods: err.authMethods ?? [] },
+          });
+        }
+      } finally {
+        dispatch({ type: "busy", key, busy: false });
+      }
+    },
+    [],
+  );
+
+  /** Hand a rate-limited lead conversation and its tasks over to another agent. */
+  const handoffLead = useCallback(
+    async (oldSession: Session, toAgentId: string) => {
+      if (!oldSession.lead) return;
+      const created = await newChat(
+        oldSession.cwd,
+        toAgentId,
+        { profile: DEFAULT_PROFILE },
+        { lead: true, team: oldSession.lead.teamId },
+      );
+      if (!created) return;
+      const oldAgentName = state.agents.find((a) => a.id === oldSession.agentId)?.name ?? oldSession.agentId;
+      const toAgentName = state.agents.find((a) => a.id === toAgentId)?.name ?? toAgentId;
+      try {
+        await api.handoffLead(oldSession.agentId, oldSession.sessionId, created.agentId, created.sessionId);
+      } catch (e) {
+        dispatch({ type: "notice", key: created.key, text: toHubError(e).message, tone: "error" });
+      }
+      dispatch({ type: "handoff", fromKey: oldSession.key, toKey: created.key, toAgentName });
+      const memo = handoffMemo(oldSession, oldAgentName);
+      await sendPrompt(created, memo, [], HANDOFF_BRIEF_LABEL);
+    },
+    [newChat, sendPrompt, state.agents],
+  );
+
+  const openSession = useCallback(
+    (key: string) => {
+      if (state.sessions.some((s) => s.key === key)) dispatch({ type: "activate", key });
+    },
+    [state.sessions],
+  );
 
   const cancel = useCallback(
     async (session: Session) => {
@@ -545,7 +605,7 @@ export default function App() {
           className="full"
           state={state}
           session={active}
-          onOpenSession={(key) => dispatch({ type: "activate", key })}
+          onOpenSession={openSession}
         />
       )}
       <Sidebar
@@ -598,7 +658,9 @@ export default function App() {
         agentMode={agentMode}
         teamId={teamId}
         onChangeMode={changeMode}
-        onOpenSession={(key) => dispatch({ type: "activate", key })}
+        onOpenSession={openSession}
+        onHandoff={handoffLead}
+        onDismissLimit={(key) => dispatch({ type: "dismissLimited", key })}
         banner={update && <UpdateBanner update={update} onDismiss={() => setUpdate(null)} />}
         onMergeTask={(session, taskId) =>
           api

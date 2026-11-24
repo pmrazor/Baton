@@ -29,6 +29,10 @@ pub struct Member {
     /// What this member is good at, in plain words.
     #[serde(default)]
     pub role: String,
+    /// Member id to hand a task to when this member hits its plan limit;
+    /// None picks the closest available member of the team.
+    #[serde(default)]
+    pub fallback: Option<String>,
 }
 
 fn default_profile() -> String {
@@ -70,6 +74,7 @@ fn member(id: &str, name: &str, agent: &str, config: Value, role: &str) -> Membe
         launch: HashMap::new(),
         config: serde_json::from_value(config).unwrap_or_default(),
         role: role.into(),
+        fallback: None,
     }
 }
 
@@ -206,6 +211,58 @@ pub fn auto_team() -> Team {
     }
 }
 
+/// Rough capability tier, from keywords in the model id, then the member's
+/// name, id and thinking level (the first that has one wins): 3 strongest,
+/// 2 standard, 1 fast/cheap. Whole words only, so "deepseek" isn't "deep"
+/// and "gemini" isn't "mini".
+pub fn tier(member: &Member) -> u8 {
+    let model = member.config.get("model").and_then(Value::as_str);
+    let effort = member
+        .config
+        .iter()
+        .filter(|(k, _)| ["effort", "thought", "reasoning"].iter().any(|w| k.contains(w)))
+        .find_map(|(_, v)| v.as_str());
+    let sources = [model.unwrap_or(""), member.name.as_str(), member.id.as_str(), effort.unwrap_or("")];
+    for text in sources {
+        let text = text.to_lowercase();
+        for word in text.split(|c: char| !c.is_alphanumeric()) {
+            match word {
+                "opus" | "fable" | "neon" | "pro" | "deep" => return 3,
+                "sonnet" | "argon" | "default" => return 2,
+                "haiku" | "flash" | "hydrogen" | "quick" | "mini" | "low" => return 1,
+                _ => {}
+            }
+        }
+    }
+    2
+}
+
+/// Who takes over a task from `member` when it hits its plan limit: its
+/// explicit fallback if that one can run, else the team member closest in
+/// tier (same, then higher, then lower; team order breaks ties). Never
+/// `member` itself.
+pub fn pick_fallback(
+    team: &Team,
+    member: &Member,
+    is_limited: impl Fn(&Member) -> bool,
+    installed: impl Fn(&str) -> bool,
+) -> Option<Member> {
+    let usable = |m: &&Member| m.id != member.id && !is_limited(m) && installed(&m.agent_id);
+    let explicit = member.fallback.as_deref().and_then(|id| team.members.iter().find(|m| m.id == id));
+    if let Some(m) = explicit.filter(usable) {
+        return Some(m.clone());
+    }
+    let own = i16::from(tier(member));
+    team.members
+        .iter()
+        .filter(usable)
+        .min_by_key(|m| {
+            let diff = i16::from(tier(m)) - own;
+            (match diff.signum() { 0 => 0, 1 => 1, _ => 2 }, diff.abs())
+        })
+        .cloned()
+}
+
 pub struct Teams {
     file: PathBuf,
     list: Mutex<Vec<Team>>,
@@ -338,5 +395,90 @@ mod tests {
         assert_eq!(team.max_parallel, 3);
         assert_eq!(team.isolation, "worktree");
         assert_eq!(team.members[0].profile_id, "default");
+        assert_eq!(team.members[0].fallback, None);
+    }
+
+    #[test]
+    fn fallbacks_round_trip_as_camel_case() {
+        let mut m = member("a", "A", "claude", json!({}), "r");
+        m.fallback = Some("b".into());
+        let v = serde_json::to_value(&m).unwrap();
+        assert_eq!(v["fallback"], "b");
+        let back: Member = serde_json::from_value(v).unwrap();
+        assert_eq!(back.fallback.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn tiers_come_from_model_and_name() {
+        let tier_of = |name: &str, config: Value| tier(&member("x", name, "claude", config, "r"));
+        assert_eq!(tier_of("Claude Code · Fable", json!({ "model": "fable" })), 3);
+        assert_eq!(tier_of("x", json!({ "model": "claude-OPUS-5-5" })), 3);
+        assert_eq!(tier_of("x", json!({ "model": "gemini-3-pro" })), 3);
+        assert_eq!(tier_of("x", json!({ "model": "sonnet" })), 2);
+        assert_eq!(tier_of("x", json!({ "model": "default" })), 2);
+        assert_eq!(tier_of("Antigravity · Gemini", json!({})), 2, "no model");
+        assert_eq!(tier_of("x", json!({ "model": "haiku" })), 1);
+        assert_eq!(tier_of("x", json!({ "model": "gemini-3-flash" })), 1);
+        assert_eq!(tier_of("x", json!({ "model": "gpt-5-mini" })), 1);
+        assert_eq!(tier_of("Some · Neon", json!({})), 3, "the name counts when the model says nothing");
+        assert_eq!(tier_of("Hydrogen", json!({})), 1);
+        // Whole words: DeepSeek isn't "deep", Gemini isn't "mini".
+        assert_eq!(tier_of("DeepSeek · V4.1 Flash", json!({ "model": r#"["deepseek-account","deepseek-flash"]"# })), 1);
+        assert_eq!(tier_of("DeepSeek · V4 Pro", json!({ "model": r#"["deepseek-account","deepseek-v4-pro"]"# })), 3);
+        assert_eq!(tier_of("x", json!({ "model": "gemini" })), 2);
+        // Built-in thinking-level members.
+        assert_eq!(tier(&codex_team().members[0]), 3);
+        assert_eq!(tier(&codex_team().members[1]), 1);
+    }
+
+    fn roster() -> Team {
+        builtin(
+            "t",
+            "T",
+            vec![
+                member("opus", "Opus", "claude", json!({ "model": "opus" }), "r"),
+                member("sonnet", "Sonnet", "claude", json!({ "model": "sonnet" }), "r"),
+                member("haiku", "Haiku", "claude", json!({ "model": "haiku" }), "r"),
+                member("gemini-pro", "Gemini Pro", "antigravity", json!({ "model": "gemini-3-pro" }), "r"),
+                member("ds-flash", "DeepSeek Flash", "dsh", json!({ "model": "deepseek-flash" }), "r"),
+            ],
+        )
+    }
+
+    fn pick(team: &Team, id: &str, limited: &[&str], missing: &[&str]) -> Option<String> {
+        let m = team.members.iter().find(|m| m.id == id).unwrap();
+        pick_fallback(team, m, |x| limited.contains(&x.id.as_str()), |a| !missing.contains(&a)).map(|m| m.id)
+    }
+
+    #[test]
+    fn explicit_fallback_comes_first() {
+        let mut team = roster();
+        team.members[0].fallback = Some("ds-flash".into());
+        assert_eq!(pick(&team, "opus", &["opus"], &[]).as_deref(), Some("ds-flash"));
+        // A limited, uninstalled or unknown fallback gives way to the tier choice.
+        assert_eq!(pick(&team, "opus", &["opus", "ds-flash"], &[]).as_deref(), Some("gemini-pro"));
+        assert_eq!(pick(&team, "opus", &["opus"], &["dsh"]).as_deref(), Some("gemini-pro"));
+        team.members[0].fallback = Some("gone".into());
+        assert_eq!(pick(&team, "opus", &["opus"], &[]).as_deref(), Some("gemini-pro"));
+        // Pointing at itself never picks itself.
+        team.members[0].fallback = Some("opus".into());
+        assert_eq!(pick(&team, "opus", &[], &[]).as_deref(), Some("gemini-pro"));
+    }
+
+    #[test]
+    fn fallback_prefers_the_same_tier_then_higher_then_lower() {
+        let team = roster();
+        assert_eq!(pick(&team, "opus", &["opus"], &[]).as_deref(), Some("gemini-pro"), "same tier");
+        assert_eq!(pick(&team, "opus", &["opus", "gemini-pro"], &[]).as_deref(), Some("sonnet"), "then the next lower");
+        assert_eq!(pick(&team, "sonnet", &["sonnet"], &[]).as_deref(), Some("opus"), "higher before lower");
+        assert_eq!(pick(&team, "haiku", &["haiku"], &[]).as_deref(), Some("ds-flash"), "same tier");
+        assert_eq!(pick(&team, "haiku", &["haiku", "ds-flash"], &[]).as_deref(), Some("sonnet"), "closest higher");
+        assert_eq!(pick(&team, "haiku", &["haiku"], &["dsh"]).as_deref(), Some("sonnet"), "uninstalled skipped");
+        assert_eq!(pick(&team, "gemini-pro", &[], &["claude"]).as_deref(), Some("ds-flash"));
+        let all = ["opus", "sonnet", "haiku", "gemini-pro", "ds-flash"];
+        assert_eq!(pick(&team, "opus", &all, &[]), None);
+        // Even when it isn't limited, a member is never its own fallback.
+        let alone = builtin("a", "A", vec![member("solo", "Solo", "claude", json!({}), "r")]);
+        assert_eq!(pick(&alone, "solo", &[], &[]), None);
     }
 }

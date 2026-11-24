@@ -969,6 +969,19 @@ button {
   color: var(--danger);
   white-space: pre-wrap;
 }
+.notice-link {
+  margin-left: 8px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+}
+.notice-link:hover {
+  text-decoration: underline;
+}
 .typing {
   font-size: 13px;
   color: var(--muted);

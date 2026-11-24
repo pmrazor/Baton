@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect, useRef, type ReactNode } from "react";
 import { Download, FolderPlus } from "lucide-react";
 import { api } from "../api";
+import { accountLimit, leadLimit } from "../handoff";
 import type { State } from "../store";
 import {
   accountKey,
@@ -19,6 +20,7 @@ import { ToolRow } from "./Messages";
 import { groupTurns, TurnView } from "./Turn";
 import PermissionCard from "./PermissionCard";
 import { baseName } from "./Sidebar";
+import { fmtReset } from "./UsagePanel";
 
 // xterm is loaded only once a terminal is opened.
 const TerminalView = lazy(() => import("./TerminalView"));
@@ -50,6 +52,8 @@ interface Props {
   /** Shown under the tab bar (e.g. an available update). */
   banner?: ReactNode;
   onDiscardTask: (session: Session, taskId: string) => void;
+  onHandoff: (session: Session, toAgentId: string) => void;
+  onDismissLimit: (key: string) => void;
 }
 
 export type Tab = "chat" | "terminal" | "activity" | "logs";
@@ -124,6 +128,7 @@ export default function ChatView(p: Props) {
   const { state, session, tab } = p;
   const agentName = (id: string) => state.agents.find((a) => a.id === id)?.name ?? id;
   const cwd = session?.cwd ?? state.workspace;
+  const limit = leadLimit(session, state.accountUsage);
 
   return (
     <main className="main">
@@ -156,6 +161,17 @@ export default function ChatView(p: Props) {
         </div>
       )}
       {state.authPrompt && <AuthBanner {...p} agentName={agentName(state.authPrompt.agentId)} />}
+      {session && limit && (
+        <LimitBanner
+          state={state}
+          session={session}
+          resetsAt={limit.resetsAt}
+          busy={!!p.connecting}
+          agentName={agentName(session.agentId)}
+          onHandoff={p.onHandoff}
+          onDismiss={p.onDismissLimit}
+        />
+      )}
 
       {tab === "terminal" && cwd ? (
         // Without the composer, so keys go to the shell.
@@ -233,7 +249,7 @@ function ConversationView(p: Props & { agentName: (id: string) => string }) {
                 turn={turn}
                 running={busy && i === turns.length - 1}
                 isLast={i === turns.length - 1}
-                tasks={session?.tasks?.filter((t) => t.turnId === turn.user?.id)}
+                tasks={session?.tasks?.filter((t) => t.turnId === turn.user?.id || (i === 0 && !t.turnId))}
                 agents={state.agents}
                 permissions={state.permissions}
                 onOpen={p.onOpenSession}
@@ -349,6 +365,50 @@ function AuthBanner(p: Props & { agentName: string }) {
           다시 시도
         </button>
         <button className="btn" onClick={p.onDismissAuth}>
+          닫기
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function LimitBanner(p: {
+  state: State;
+  session: Session;
+  resetsAt?: number;
+  busy: boolean;
+  agentName: string;
+  onHandoff: (session: Session, toAgentId: string) => void;
+  onDismiss: (key: string) => void;
+}) {
+  const { state, session, resetsAt, busy, agentName, onHandoff, onDismiss } = p;
+  const candidates = installedAgents(state.agents).filter(
+    (a) => a.id !== session.agentId && !accountLimit(state.accountUsage[accountKey(a.id, DEFAULT_PROFILE)]),
+  );
+  return (
+    <div className="auth-banner">
+      <div>
+        <b>
+          총괄({agentName})이 사용량 한도에 걸렸어요
+          {resetsAt !== undefined && ` · ${fmtReset(resetsAt)}`}
+        </b>
+        <div className="muted small">
+          지금까지 대화를 정리해서 다른 에이전트에게 넘길 수 있어요. 정리한 내용만 넘어가서 세세한 맥락은 빠질 수
+          있어요.
+        </div>
+      </div>
+      <div className="auth-actions">
+        {candidates.map((a) => (
+          <button
+            key={a.id}
+            className="btn btn-primary"
+            disabled={busy}
+            onClick={() => onHandoff(session, a.id)}
+          >
+            {a.name}로 이어서 하기
+          </button>
+        ))}
+        <button className="btn" onClick={() => onDismiss(session.key)}>
           닫기
         </button>
       </div>

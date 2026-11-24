@@ -18,8 +18,9 @@ import type {
   ToolCallFields,
   TurnStats,
 } from "./types";
-import { accountKey, attachmentOf, isTaskActive, sessionKey } from "./types";
+import { accountKey, attachmentOf, isTaskActive, profileOf, sessionKey } from "./types";
 import type { TaskSessionEvent } from "./api";
+import { accountLimit } from "./handoff";
 import { quotasFromUpdate } from "./usage";
 
 export interface AuthPrompt {
@@ -100,9 +101,12 @@ export type Action =
   | { type: "rekey"; key: string; sessionId: string; configOptions: ConfigOption[]; modes: SessionModes | null }
   | { type: "dropDrafts" }
   | { type: "closeSession"; key: string }
-  | { type: "userMessage"; key: string; text: string; attachments?: Attachment[] }
+  | { type: "userMessage"; key: string; text: string; attachments?: Attachment[]; briefLabel?: string }
   | { type: "busy"; key: string; busy: boolean }
   | { type: "notice"; key: string; text: string; tone: "info" | "error" }
+  | { type: "sessionLimited"; key: string; resetsAt?: number }
+  | { type: "dismissLimited"; key: string }
+  | { type: "handoff"; fromKey: string; toKey: string; toAgentName: string }
   | { type: "update"; agentId: string; profileId: string; sessionId: string; update: any }
   | { type: "auth"; agentId: string; profileId: string; status: AuthStatus | null }
   | { type: "accountUsage"; agentId: string; profileId: string; quotas: QuotaEntry[] }
@@ -177,7 +181,12 @@ export function reducer(state: State, action: Action): State {
       return { ...state, workspaces, workspace, sessions, activeKey };
     }
     case "turnDone":
-      return mapSession(state, action.key, (s) => ({ ...s, lastTurn: action.stats, updatedAt: Date.now() }));
+      return mapSession(state, action.key, (s) => ({
+        ...s,
+        limited: undefined,
+        lastTurn: action.stats,
+        updatedAt: Date.now(),
+      }));
     case "sessionCreated": {
       const key = sessionKey(action.agentId, action.sessionId);
       const session: Session = {
@@ -261,23 +270,40 @@ export function reducer(state: State, action: Action): State {
       const activeKey = state.activeKey === action.key ? null : state.activeKey;
       return { ...state, sessions, activeKey };
     }
-    case "userMessage":
+    case "userMessage": {
+      const id = nextId();
+      const now = Date.now();
+      const item: ChatItem = action.briefLabel
+        ? {
+            kind: "brief",
+            id,
+            text: action.text,
+            label: action.briefLabel,
+            startedAt: now,
+            ...(action.attachments?.length ? { attachments: action.attachments } : {}),
+          }
+        : {
+            kind: "user",
+            id,
+            text: action.text,
+            startedAt: now,
+            ...(action.attachments?.length ? { attachments: action.attachments } : {}),
+          };
       return mapSession(state, action.key, (s) => ({
         ...s,
-        title: s.items.length === 0 ? (action.text || action.attachments?.[0]?.name || s.title).slice(0, 40) : s.title,
+        title:
+          s.items.length === 0 && !action.briefLabel
+            ? (action.text || action.attachments?.[0]?.name || s.title).slice(0, 40)
+            : s.title,
         draft: false,
-        updatedAt: Date.now(),
-        items: [
-          ...s.items,
-          {
-            kind: "user",
-            id: nextId(),
-            text: action.text,
-            startedAt: Date.now(),
-            ...(action.attachments?.length ? { attachments: action.attachments } : {}),
-          },
-        ],
+        updatedAt: now,
+        // Attach any handed-over tasks that don't have a turn in this session yet.
+        tasks: s.tasks?.some((t) => !t.turnId)
+          ? s.tasks.map((t) => (t.turnId ? t : { ...t, turnId: id }))
+          : s.tasks,
+        items: [...s.items, item],
       }));
+    }
     case "busy":
       return mapSession(state, action.key, (s) => ({
         ...s,
@@ -289,6 +315,69 @@ export function reducer(state: State, action: Action): State {
         ...s,
         items: [...s.items, { kind: "notice", id: nextId(), text: action.text, tone: action.tone }],
       }));
+    case "sessionLimited":
+      return mapSession(state, action.key, (s) => {
+        const acc = accountLimit(state.accountUsage[accountKey(s.agentId, profileOf(s.launch))]);
+        return { ...s, limited: { resetsAt: action.resetsAt ?? acc?.resetsAt } };
+      });
+    case "dismissLimited":
+      return mapSession(state, action.key, (s) => ({ ...s, limited: { ...s.limited, dismissed: true } }));
+    case "handoff": {
+      const from = state.sessions.find((s) => s.key === action.fromKey);
+      const to = state.sessions.find((s) => s.key === action.toKey);
+      if (!from || !to) return state;
+      const existingById = new Map((to.tasks ?? []).map((t) => [t.id, t]));
+      const firstTurnId = to.items.find((i) => i.kind === "user" || i.kind === "brief")?.id;
+      const movedIds = new Set<string>();
+      const moved: TaskInfo[] = (from.tasks ?? []).map((t) => {
+        movedIds.add(t.id);
+        const latest = existingById.get(t.id) ?? t;
+        return {
+          ...latest,
+          leadAgentId: to.agentId,
+          leadSessionId: to.sessionId,
+          turnId: existingById.get(t.id)?.turnId ?? firstTurnId,
+        };
+      });
+      const rest = (to.tasks ?? []).filter((t) => !movedIds.has(t.id));
+      const mergedTasks = [...moved, ...rest];
+      return {
+        ...state,
+        sessions: state.sessions.map((s) => {
+          if (s.key === action.fromKey) {
+            return {
+              ...s,
+              tasks: [],
+              handedTo: action.toKey,
+              limited: { ...s.limited, dismissed: true },
+              items: [
+                ...s.items,
+                {
+                  kind: "notice",
+                  id: nextId(),
+                  text: `새 총괄(${action.toAgentName})로 넘겼어요`,
+                  tone: "info",
+                  link: { key: action.toKey, label: "새 대화 열기" },
+                },
+              ],
+            };
+          }
+          if (s.key === action.toKey) {
+            return {
+              ...s,
+              draft: false,
+              title: s.draft || s.title === "새 대화" ? from.title : s.title,
+              tasks: mergedTasks,
+              handedFrom: action.fromKey,
+            };
+          }
+          if (s.parent?.key === action.fromKey) {
+            return { ...s, parent: { ...s.parent, key: action.toKey } };
+          }
+          return s;
+        }),
+      };
+    }
     case "update": {
       const key = sessionKey(action.agentId, action.sessionId);
       const known = state.sessions.some((s) => s.key === key);
@@ -470,7 +559,7 @@ function applyTask(state: State, task: TaskInfo): State {
     const tasks = lead.tasks ?? [];
     const prev = tasks.find((t) => t.id === task.id);
     // A task belongs to the lead turn that was running when it first appeared.
-    const turnId = prev?.turnId ?? lead.items.filter((i) => i.kind === "user").at(-1)?.id;
+    const turnId = prev?.turnId ?? lead.items.filter((i) => i.kind === "user" || i.kind === "brief").at(-1)?.id;
     const merged = { ...task, turnId };
     return {
       ...lead,

@@ -68,6 +68,8 @@ export const api = {
   discardTask: (taskId: string) => invoke<void>("discard_task", { taskId }),
   setLeadTeam: (agentId: string, sessionId: string, teamId: string) =>
     invoke<void>("set_lead_team", { agentId, sessionId, teamId }),
+  handoffLead: (fromAgentId: string, fromSessionId: string, toAgentId: string, toSessionId: string) =>
+    invoke<void>("handoff_lead", { fromAgentId, fromSessionId, toAgentId, toSessionId }),
   listTeams: () => invoke<Team[]>("list_teams"),
   agentOptions: () => invoke<Record<string, ConfigOption[]>>("agent_options"),
   saveTeam: (team: Team) => invoke<Team>("save_team", { team }),

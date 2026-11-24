@@ -291,6 +291,18 @@ fn set_lead_team(orchestra: State<'_, Orchestra>, agent_id: String, session_id: 
     orchestra.set_team(&agent_id, &session_id, &team_id);
 }
 
+/// Reassign every task of one lead session to its replacement lead.
+#[tauri::command]
+fn handoff_lead(
+    orchestra: State<'_, Orchestra>,
+    from_agent_id: String,
+    from_session_id: String,
+    to_agent_id: String,
+    to_session_id: String,
+) {
+    orchestra.handoff_lead(&from_agent_id, &from_session_id, &to_agent_id, &to_session_id);
+}
+
 /// The user wrote in a task's own chat; the lead sees it with the task's result.
 #[tauri::command]
 fn task_note(orchestra: State<'_, Orchestra>, task_id: String, text: String) {
@@ -469,6 +481,7 @@ pub fn run() {
             resume_lead_session,
             task_note,
             set_lead_team,
+            handoff_lead,
             list_agent_sessions,
             import_session,
             switch_mode,

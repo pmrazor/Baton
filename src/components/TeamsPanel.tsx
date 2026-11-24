@@ -49,13 +49,21 @@ function describe(m: TeamMember, state: State, options: Options) {
 
 function withNames(team: Team, state: State, options: Options): Team {
   const used = new Map<string, number>();
+  const renamed = new Map<string, string>();
   const members = team.members.map((m) => {
     const { name, id } = describe(m, state, options);
     const n = (used.get(id) ?? 0) + 1;
     used.set(id, n);
-    return { ...m, name, id: n > 1 ? `${id}-${n}` : id };
+    const next = n > 1 ? `${id}-${n}` : id;
+    renamed.set(m.id, next);
+    return { ...m, name, id: next };
   });
-  return { ...team, members };
+  // Ids follow the settings, so point fallbacks at the renamed members (removed ones are dropped).
+  const fallback = (m: TeamMember) => {
+    const to = m.fallback ? renamed.get(m.fallback) : undefined;
+    return to && to !== m.id ? to : null;
+  };
+  return { ...team, members: members.map((m) => ({ ...m, fallback: fallback(m) })) };
 }
 
 export default function TeamsPanel({ state, onChanged }: { state: State; onChanged: () => void }) {
@@ -233,6 +241,9 @@ function TeamEditor(p: {
             member={m}
             state={p.state}
             options={p.options}
+            others={team.members
+              .filter((_, n) => n !== i)
+              .map((o) => ({ id: o.id, name: describe(o, p.state, p.options).name }))}
             onChange={(next) => setMember(i, next)}
             onRemove={() => setTeam((t) => ({ ...t, members: t.members.filter((_, n) => n !== i) }))}
           />
@@ -246,7 +257,8 @@ function TeamEditor(p: {
             members: [
               ...t.members,
               {
-                id: "",
+                // Placeholder until saving names it, so other members can pick it as a fallback.
+                id: `new-${Date.now()}-${t.members.length}`,
                 name: "",
                 agentId: firstAgent,
                 profileId: DEFAULT_PROFILE,
@@ -279,6 +291,8 @@ function MemberRow(p: {
   member: TeamMember;
   state: State;
   options: Options;
+  /** The team's other members, for the fallback choice. */
+  others: { id: string; name: string }[];
   onChange: (m: TeamMember) => void;
   onRemove: () => void;
 }) {
@@ -360,6 +374,22 @@ function MemberRow(p: {
             value={configMode ? m.config[configMode.id] : undefined}
             onChange={(v) => setConfig(configMode!.id, v)}
           />
+        )}
+        {p.others.length > 0 && (
+          <select
+            id={id("fallback")}
+            aria-label="대체 멤버"
+            title="이 멤버가 사용 한도에 걸리면 작업을 넘겨받을 멤버예요"
+            value={m.fallback && p.others.some((o) => o.id === m.fallback) ? m.fallback : ""}
+            onChange={(e) => p.onChange({ ...m, fallback: e.target.value || null })}
+          >
+            <option value="">대체 멤버: 자동</option>
+            {p.others.map((o) => (
+              <option key={o.id} value={o.id}>
+                대체 멤버: {o.name}
+              </option>
+            ))}
+          </select>
         )}
         <button className="icon-btn" title="멤버 삭제" onClick={p.onRemove}>
           <Trash2 size={15} />

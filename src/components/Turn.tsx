@@ -109,7 +109,7 @@ export function TurnView(p: TurnProps) {
       )}
       {turn.answer && <ChatItemView item={turn.answer} isLast={isLast && !running} />}
       {turn.notices.map((n) => (
-        <ChatItemView key={n.id} item={n} isLast={false} />
+        <ChatItemView key={n.id} item={n} isLast={false} onOpenSession={onOpen} />
       ))}
     </>
   );

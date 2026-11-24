@@ -155,7 +155,7 @@ export type ChatItem =
   | { kind: "thought"; id: string; text: string }
   | ({ kind: "tool"; id: string; toolKind: string } & Omit<ToolCallFields, "kind">)
   | { kind: "plan"; id: string; entries: PlanEntry[] }
-  | { kind: "notice"; id: string; text: string; tone: "info" | "error" }
+  | { kind: "notice"; id: string; text: string; tone: "info" | "error"; link?: { key: string; label: string } }
   /** The agent condensed earlier history to stay within its context window. */
   | {
       kind: "compaction";
@@ -226,6 +226,12 @@ export interface Session {
   tasks?: TaskInfo[];
   /** Set on a task's conversation: the lead it belongs to. */
   parent?: { key: string; taskId: string };
+  /** Set when this lead hit its usage limit; cleared when a later prompt succeeds. */
+  limited?: { resetsAt?: number; dismissed?: boolean };
+  /** Key of the replacement lead chat this conversation was handed off to. */
+  handedTo?: string;
+  /** Key of the previous lead chat this conversation took over from. */
+  handedFrom?: string;
   /** Context-window usage reported by the agent (`usage_update`). */
   usage: { used: number; size: number; cost?: { amount: number; currency: string } | null } | null;
   /** Numbers from the last finished turn. */
@@ -295,6 +301,8 @@ export interface TeamMember {
   launch: Record<string, string>;
   config: Record<string, unknown>;
   role: string;
+  /** Member id that takes a task when this one hits its plan limit; unset picks one automatically. */
+  fallback?: string | null;
 }
 
 export interface Team {

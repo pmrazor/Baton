@@ -102,7 +102,15 @@ function CopyButton({ text, className = "" }: { text: string | (() => string); c
   );
 }
 
-export function ChatItemView({ item, isLast }: { item: ChatItem; isLast: boolean }) {
+export function ChatItemView({
+  item,
+  isLast,
+  onOpenSession,
+}: {
+  item: ChatItem;
+  isLast: boolean;
+  onOpenSession?: (key: string) => void;
+}) {
   switch (item.kind) {
     case "user":
       return (
@@ -136,7 +144,16 @@ export function ChatItemView({ item, isLast }: { item: ChatItem; isLast: boolean
     case "plan":
       return <PlanView entries={item.entries} />;
     case "notice":
-      return <div className={`notice notice-${item.tone}`}>{item.text}</div>;
+      return (
+        <div className={`notice notice-${item.tone}`}>
+          {item.text}
+          {item.link && onOpenSession && (
+            <button className="notice-link" onClick={() => onOpenSession(item.link!.key)}>
+              {item.link.label}
+            </button>
+          )}
+        </div>
+      );
     case "compaction":
       return <CompactionMarker item={item} />;
     case "brief":

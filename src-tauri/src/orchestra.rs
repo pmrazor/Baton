@@ -28,7 +28,7 @@ use tokio::sync::Semaphore;
 
 use crate::hub::{Hub, Launch};
 use crate::profiles::{Profiles, DEFAULT_PROFILE, PROFILE_KEY};
-use crate::teams::{Member, Team, Teams};
+use crate::teams::{pick_fallback, Member, Team, Teams};
 use crate::worktree::{self, Sandbox};
 
 const SERVER_NAME: &str = "baton";
@@ -40,6 +40,10 @@ const MAX_WAIT: Duration = Duration::from_secs(40);
 const MAX_RESULT_CHARS: usize = 8000;
 /// Most files a lead can hand a member in one delegate or follow-up.
 const MAX_TASK_ATTACHMENTS: usize = 10;
+/// How long a member stays out after a limit error whose reset time is unknown.
+const LIMIT_BACKOFF: Duration = Duration::from_secs(30 * 60);
+/// Most times one task moves to another member after hitting a limit.
+const MAX_REASSIGN: usize = 2;
 
 const INSTRUCTIONS: &str = "\
 You are the lead agent in Baton, a desktop workspace where several coding agents work together.
@@ -48,6 +52,7 @@ You can hand work to team members with the baton tools:
 - Split the request into self-contained tasks. Members cannot see this conversation, so each task message must carry
   everything needed: goal, relevant files, constraints, and what to report back.
 - Choose the member whose role fits. Prefer members with more usage left, and give simple work to cheaper members.
+- Members with \"available\": false hit their usage limit until limited_until; delegate to someone else meanwhile.
 - Set writes_files=false for read-only tasks (research, review, analysis); they run in parallel in the workspace.
   File-writing tasks depend on the team's isolation (see list_agents):
   - \"worktree\": each runs in parallel in its own copy of the workspace. Its changes reach the workspace only when you
@@ -83,6 +88,10 @@ Finish with a short report: what you did, files you changed, and anything left u
 
 fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
+fn now_secs() -> u64 {
+    now_ms() / 1000
 }
 
 fn random_token() -> String {
@@ -140,6 +149,8 @@ struct Task {
     sandbox: Option<Sandbox>,
     /// Files sent with the next turn: the brief's, then each follow-up's own.
     attachments: Vec<String>,
+    /// Member switches after a limit error, e.g. "a → b (usage limit)".
+    reassigned: Vec<String>,
 }
 
 pub struct Orchestra {
@@ -149,6 +160,9 @@ pub struct Orchestra {
     tasks: Mutex<HashMap<String, Task>>,
     by_session: Mutex<HashMap<(String, String), String>>,
     write_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Unix seconds until which an (agent, profile, model) can't run, from
+    /// limit errors: plan-limit reports can lag behind.
+    limits: Mutex<HashMap<(String, String, String), u64>>,
     next_task: AtomicU64,
     /// Per-run prefix for task ids. Leads keep their task lists across restarts,
     /// so a bare counter would hand out "t1" again and collide with old tasks.
@@ -204,6 +218,7 @@ impl Orchestra {
             tasks: Default::default(),
             by_session: Default::default(),
             write_locks: Default::default(),
+            limits: Default::default(),
             next_task: AtomicU64::new(1),
             run_id,
         })
@@ -342,6 +357,43 @@ impl Orchestra {
         }
     }
 
+    /// Reassign every task owned by one lead session to a replacement lead,
+    /// emitting `task-update` for each moved task.
+    pub fn handoff_lead(
+        &self,
+        from_agent_id: &str,
+        from_session_id: &str,
+        to_agent_id: &str,
+        to_session_id: &str,
+    ) -> usize {
+        let moved = {
+            let mut tasks = self.tasks.lock().unwrap();
+            Self::reassign_tasks(&mut tasks, from_agent_id, from_session_id, to_agent_id, to_session_id)
+        };
+        for info in &moved {
+            let _ = self.app.emit("task-update", info);
+        }
+        moved.len()
+    }
+
+    fn reassign_tasks(
+        tasks: &mut HashMap<String, Task>,
+        from_agent_id: &str,
+        from_session_id: &str,
+        to_agent_id: &str,
+        to_session_id: &str,
+    ) -> Vec<TaskInfo> {
+        let mut moved = Vec::new();
+        for task in tasks.values_mut() {
+            if task.info.lead_agent_id == from_agent_id && task.info.lead_session_id == from_session_id {
+                task.info.lead_agent_id = to_agent_id.into();
+                task.info.lead_session_id = to_session_id.into();
+                moved.push(task.info.clone());
+            }
+        }
+        moved
+    }
+
     fn lead(&self, token: &str) -> Option<Lead> {
         self.leads.lock().unwrap().get(token).cloned()
     }
@@ -373,6 +425,37 @@ impl Orchestra {
         self.write_locks.lock().unwrap().entry(cwd.into()).or_default().clone()
     }
 
+    /// Until when `m` can't run (Unix seconds, 0 if unknown), from its plan
+    /// limits or a limit error seen earlier; None if it can run now.
+    fn limited_until(&self, hub: &Hub, m: &Member) -> Option<u64> {
+        let now = now_secs();
+        let seen = {
+            let mut limits = self.limits.lock().unwrap();
+            limits.retain(|_, until| *until > now);
+            limits.get(&limit_key(m)).copied()
+        };
+        let reported = hub.quota(&m.agent_id, &m.profile_id).and_then(|q| limit_state(&q, member_model(m), now));
+        seen.max(reported)
+    }
+
+    /// Keep `m` out after a limit error: until its reported reset, or for
+    /// LIMIT_BACKOFF when none is known. Returns the time recorded.
+    fn record_limit(&self, hub: &Hub, m: &Member) -> u64 {
+        let now = now_secs();
+        let until = hub
+            .quota(&m.agent_id, &m.profile_id)
+            .and_then(|q| limit_state(&q, member_model(m), now))
+            .filter(|&u| u > now)
+            .unwrap_or(now + LIMIT_BACKOFF.as_secs());
+        self.limits.lock().unwrap().insert(limit_key(m), until);
+        until
+    }
+
+    /// Who could take `member`'s work now (see `pick_fallback`).
+    fn fallback_for(&self, hub: &Hub, team: &Team, member: &Member) -> Option<Member> {
+        pick_fallback(team, member, |m| self.limited_until(hub, m).is_some(), |agent| installed(hub, agent))
+    }
+
     // ---------- tools ----------
 
     fn list_agents(&self, lead: &Lead) -> Value {
@@ -380,6 +463,7 @@ impl Orchestra {
         let hub = self.app.state::<Hub>();
         let profiles = self.app.state::<Arc<Profiles>>();
         let tasks = self.tasks.lock().unwrap();
+        let now = now_secs();
         let members: Vec<Value> = team
             .members
             .iter()
@@ -391,7 +475,7 @@ impl Orchestra {
                     profiles.list().into_iter().find(|p| p.id == m.profile_id).map(|p| p.name).unwrap_or(m.profile_id.clone())
                 };
                 let active = tasks.values().filter(|t| t.member.id == m.id && !Self::is_terminal(&t.info.status)).count();
-                json!({
+                let mut entry = json!({
                     "id": m.id,
                     "name": m.name,
                     "role": m.role,
@@ -400,7 +484,12 @@ impl Orchestra {
                     "settings": { "launch": m.launch, "config": m.config },
                     "usage": usage_summary(hub.quota(&m.agent_id, &m.profile_id)),
                     "active_tasks": active,
-                })
+                });
+                if let Some(until) = self.limited_until(&hub, m) {
+                    entry["available"] = json!(false);
+                    entry["limited_until"] = json!(limit_text(now, until));
+                }
+                entry
             })
             .collect();
         let git = worktree::repo_root(std::path::Path::new(&lead.cwd)).is_some();
@@ -417,8 +506,19 @@ impl Orchestra {
             .find(|m| m.id == member_id)
             .cloned()
             .ok_or_else(|| format!("unknown member '{member_id}'; call list_agents for valid ids"))?;
-        if !installed(&self.app.state::<Hub>(), &member.agent_id) {
+        let hub = self.app.state::<Hub>();
+        if !installed(&hub, &member.agent_id) {
             return Err(format!("member '{member_id}' is not available: its agent is not installed on this computer"));
+        }
+        if let Some(until) = self.limited_until(&hub, &member) {
+            let hint = match self.fallback_for(&hub, &team, &member) {
+                Some(m) => format!("Delegate to '{}' instead; it can run now.", m.id),
+                None => "No other member of the team can run right now: wait for the reset or tell the user.".into(),
+            };
+            return Err(format!(
+                "member '{member_id}' is not available: it hit its usage limit (resets {}). {hint}",
+                limit_text(now_secs(), until)
+            ));
         }
         let task_text = args.get("task").and_then(Value::as_str).filter(|t| !t.trim().is_empty()).ok_or("task is required")?;
         let title = args
@@ -465,6 +565,7 @@ impl Orchestra {
                 cancel_requested: false,
                 sandbox: None,
                 attachments,
+                reassigned: Vec::new(),
             },
         );
         self.emit_task(&id);
@@ -523,7 +624,7 @@ impl Orchestra {
         if task.result.chars().count() > MAX_RESULT_CHARS {
             result.push_str("\n[…truncated]");
         }
-        json!({
+        let mut out = json!({
             "task_id": id,
             "title": task.info.title,
             "member": task.info.member_id,
@@ -537,7 +638,11 @@ impl Orchestra {
             "changed_files": task.info.changes,
             "merge_state": task.info.merge_state,
             "conflicts": task.info.conflicts,
-        })
+        });
+        if !task.reassigned.is_empty() {
+            out["reassigned"] = json!(task.reassigned.join("; "));
+        }
+        out
     }
 
     async fn wait(&self, args: &Value) -> Value {
@@ -661,7 +766,8 @@ impl Orchestra {
 }
 
 /// One turn of a task: start its session if needed, honour the parallel and
-/// write limits, prompt, and record the final answer.
+/// write limits, prompt, and record the final answer. If the member hits its
+/// plan limit on the task's first turn, the task moves to a fallback member.
 async fn run_turn(app: AppHandle, token: String, task_id: String, message: String, writes: bool, first: bool) {
     let orch = app.state::<Orchestra>();
     let hub = app.state::<Hub>();
@@ -677,7 +783,7 @@ async fn run_turn(app: AppHandle, token: String, task_id: String, message: Strin
         return;
     }
 
-    let (member, mut cwd, isolated, attachments) = {
+    let (mut member, mut cwd, isolated, attachments) = {
         let tasks = orch.tasks.lock().unwrap();
         let Some(t) = tasks.get(&task_id) else { return };
         (t.member.clone(), t.cwd.clone(), t.info.isolated, t.attachments.clone())
@@ -702,38 +808,9 @@ async fn run_turn(app: AppHandle, token: String, task_id: String, message: Strin
                 t.sandbox = Some(sb);
             }
         }
-        let mut launch: Launch = member.launch.clone();
-        launch.insert(PROFILE_KEY.into(), member.profile_id.clone());
-        let session = match hub.new_session(&member.agent_id, &cwd, &launch, json!([]), &member.config, Value::Null).await {
-            Ok(s) => s,
-            Err(e) => return fail(&orch, &task_id, &e.message),
-        };
-        let Some(session_id) = session.get("sessionId").and_then(Value::as_str).map(str::to_owned) else {
-            return fail(&orch, &task_id, "agent returned no session id");
-        };
-        orch.by_session.lock().unwrap().insert((member.agent_id.clone(), session_id.clone()), task_id.clone());
-        let info = {
-            let mut tasks = orch.tasks.lock().unwrap();
-            let Some(t) = tasks.get_mut(&task_id) else { return };
-            t.info.session_id = Some(session_id.clone());
-            t.info.clone()
-        };
-        let _ = app.emit(
-            "task-session",
-            json!({
-                "task": info,
-                "session": {
-                    "agentId": member.agent_id,
-                    "sessionId": session_id,
-                    "cwd": cwd,
-                    "launch": launch,
-                    "configOptions": session.get("configOptions"),
-                    "modes": session.get("modes"),
-                },
-                "brief": message,
-                "attachments": attachments,
-            }),
-        );
+        if let Err(e) = start_session(&app, &task_id, &member, &cwd, &message, &attachments).await {
+            return fail(&orch, &task_id, &e);
+        }
     } else if let Some(info) = orch.tasks.lock().unwrap().get(&task_id).map(|t| t.info.clone()) {
         let _ = app.emit("task-brief", json!({ "task": info, "text": message, "attachments": attachments }));
     }
@@ -756,23 +833,82 @@ async fn run_turn(app: AppHandle, token: String, task_id: String, message: Strin
         return;
     }
 
-    let session_id = {
-        let mut tasks = orch.tasks.lock().unwrap();
-        let Some(t) = tasks.get_mut(&task_id) else { return };
-        t.answer.clear();
-        t.after_tool = false;
-        t.info.session_id.clone()
-    };
-    let Some(session_id) = session_id else { return fail(&orch, &task_id, "task has no session") };
-    orch.set_status(&task_id, "running");
+    let prompt = if first { format!("{SUBTASK_PREAMBLE}\n\n{message}") } else { message.clone() };
+    let mut switches = 0;
+    let outcome = loop {
+        let session_id = {
+            let mut tasks = orch.tasks.lock().unwrap();
+            let Some(t) = tasks.get_mut(&task_id) else { return };
+            t.answer.clear();
+            t.after_tool = false;
+            t.info.session_id.clone()
+        };
+        let Some(session_id) = session_id else { return fail(&orch, &task_id, "task has no session") };
+        orch.set_status(&task_id, "running");
 
-    let prompt = if first { format!("{SUBTASK_PREAMBLE}\n\n{message}") } else { message };
-    // Absolute paths, so they still resolve from a worktree task's copy of the workspace.
-    let outcome = hub.prompt(&member.agent_id, &session_id, &prompt, &attachments).await;
+        // Absolute paths, so they still resolve from a worktree task's copy of the workspace.
+        let outcome = hub.prompt(&member.agent_id, &session_id, &prompt, &attachments).await.map_err(|e| e.message);
+        let error = match &outcome {
+            Err(e) if is_limit_error(e) && !cancelled(&orch) => e.clone(),
+            _ => break outcome,
+        };
+        let until = orch.record_limit(&hub, &member);
+        let resets = limit_text(now_secs(), until);
+        if !first {
+            // A new member wouldn't have this task's context.
+            break Err(format!(
+                "member '{}' hit its usage limit (resets {resets}), so this follow-up didn't run. Delegate a new, \
+                 self-contained task to an available member (see list_agents). Agent error: {error}",
+                member.id
+            ));
+        }
+        let team = app.state::<Teams>().get(&lead.team_id);
+        let next = if switches < MAX_REASSIGN { orch.fallback_for(&hub, &team, &member) } else { None };
+        let Some(next) = next else {
+            let why = if switches < MAX_REASSIGN { "no other team member can take it now" } else { "it was already reassigned twice" };
+            break Err(format!(
+                "member '{}' hit its usage limit (resets {resets}) and the task wasn't moved: {why}. \
+                 Delegate it again after the reset, or tell the user. Agent error: {error}",
+                member.id
+            ));
+        };
+
+        // Move the task, then start it afresh on the new member in the same folder.
+        let note = format!("{} → {} (usage limit)", member.id, next.id);
+        if let Some(t) = orch.tasks.lock().unwrap().get_mut(&task_id) {
+            t.member = next.clone();
+            t.info.member_id = next.id.clone();
+            t.info.member_name = next.name.clone();
+            t.info.agent_id = next.agent_id.clone();
+            t.info.session_id = None;
+            t.reassigned.push(note.clone());
+        }
+        // The old session's late updates must not end up in the new answer.
+        orch.by_session.lock().unwrap().remove(&(member.agent_id.clone(), session_id));
+        orch.set_status(&task_id, "starting");
+        if let Err(e) = start_session(&app, &task_id, &next, &cwd, &message, &attachments).await {
+            break Err(format!("reassigned {note}, but the new member failed to start: {e}"));
+        }
+        member = next;
+        switches += 1;
+        if cancelled(&orch) {
+            orch.set_status(&task_id, "cancelled");
+            return;
+        }
+    };
+
     let status = {
         let mut tasks = orch.tasks.lock().unwrap();
         let Some(t) = tasks.get_mut(&task_id) else { return };
         t.result = std::mem::take(&mut t.answer);
+        if switches > 0 {
+            t.result = format!(
+                "[Baton] Reassigned {} after usage limits; the report below is from '{}'.\n\n{}",
+                t.reassigned.join(", then "),
+                t.info.member_id,
+                t.result
+            );
+        }
         let outcome_status = match &outcome {
             Ok(res) => match res.get("stopReason").and_then(Value::as_str) {
                 Some("cancelled") => "cancelled",
@@ -783,7 +919,7 @@ async fn run_turn(app: AppHandle, token: String, task_id: String, message: Strin
                 _ => "done",
             },
             Err(e) => {
-                t.info.error = Some(e.message.clone());
+                t.info.error = Some(e.clone());
                 "failed"
             }
         };
@@ -801,6 +937,52 @@ async fn run_turn(app: AppHandle, token: String, task_id: String, message: Strin
         }
     }
     orch.set_status(&task_id, status);
+}
+
+/// Start `member`'s session for a task in `cwd`, link it to the task, and
+/// tell the UI (`task-session`) so the task's chat appears with its brief.
+async fn start_session(
+    app: &AppHandle,
+    task_id: &str,
+    member: &Member,
+    cwd: &str,
+    brief: &str,
+    attachments: &[String],
+) -> Result<(), String> {
+    let orch = app.state::<Orchestra>();
+    let hub = app.state::<Hub>();
+    let mut launch: Launch = member.launch.clone();
+    launch.insert(PROFILE_KEY.into(), member.profile_id.clone());
+    let session = hub
+        .new_session(&member.agent_id, cwd, &launch, json!([]), &member.config, Value::Null)
+        .await
+        .map_err(|e| e.message)?;
+    let session_id =
+        session.get("sessionId").and_then(Value::as_str).map(str::to_owned).ok_or("agent returned no session id")?;
+    orch.by_session.lock().unwrap().insert((member.agent_id.clone(), session_id.clone()), task_id.to_string());
+    let info = {
+        let mut tasks = orch.tasks.lock().unwrap();
+        let t = tasks.get_mut(task_id).ok_or("task is gone")?;
+        t.info.session_id = Some(session_id.clone());
+        t.info.clone()
+    };
+    let _ = app.emit(
+        "task-session",
+        json!({
+            "task": info,
+            "session": {
+                "agentId": member.agent_id,
+                "sessionId": session_id,
+                "cwd": cwd,
+                "launch": launch,
+                "configOptions": session.get("configOptions"),
+                "modes": session.get("modes"),
+            },
+            "brief": brief,
+            "attachments": attachments,
+        }),
+    );
+    Ok(())
 }
 
 /// A lead's user message with the agent-mode note in front and its
@@ -876,6 +1058,92 @@ fn fail(orch: &Orchestra, task_id: &str, message: &str) {
     orch.set_status(task_id, "failed");
 }
 
+/// Whether an agent's error means its account hit a plan or rate limit.
+fn is_limit_error(msg: &str) -> bool {
+    let m = msg.to_lowercase();
+    (m.contains("hit your") && m.contains("limit"))
+        || ["usage limit", "rate limit", "usagelimitexceeded", "ratelimitexceeded", "resource_exhausted", "quota exceeded", "429"]
+            .iter()
+            .any(|k| m.contains(k))
+}
+
+/// The model setting a member's limits are tracked under.
+fn member_model(m: &Member) -> Option<&str> {
+    m.config.get("model").and_then(Value::as_str)
+}
+
+fn limit_key(m: &Member) -> (String, String, String) {
+    (m.agent_id.clone(), m.profile_id.clone(), member_model(m).unwrap_or_default().to_string())
+}
+
+/// When a member can't run now because of its plan limits: Some(reset in
+/// Unix seconds, 0 if unknown), None if it can. `info` is a Claude
+/// rate-limit report or a usage report with limit groups. Antigravity
+/// groups are per model family, so `model` picks the group; with no clear
+/// family (default model, Codex) only every group being spent counts.
+fn limit_state(info: &Value, model: Option<&str>, now_secs: u64) -> Option<u64> {
+    // A reset already past means that part of the report is stale.
+    let open = |reset: Option<u64>| match reset {
+        Some(r) if r <= now_secs => None,
+        r => Some(r.unwrap_or(0)),
+    };
+    if let Some(groups) = info.get("groups").and_then(Value::as_array) {
+        // A group is spent while any of its buckets is; free when all reset.
+        let spent = |g: &Value| -> Option<u64> {
+            g.get("buckets")?
+                .as_array()?
+                .iter()
+                .filter(|b| b.get("remaining_fraction").and_then(Value::as_f64).is_some_and(|f| f <= 0.0))
+                .filter_map(|b| open(bucket_reset(b)))
+                .max()
+        };
+        let model = model.unwrap_or_default().to_lowercase();
+        let family = if model.starts_with("gemini") {
+            Some("gemini")
+        } else if model.contains("claude") || model.contains("gpt") {
+            Some("claude") // "Claude and GPT models"
+        } else {
+            None
+        };
+        let named = |g: &&Value| {
+            family.is_some_and(|f| g.get("name").and_then(Value::as_str).is_some_and(|n| n.to_lowercase().contains(f)))
+        };
+        let own: Vec<&Value> = groups.iter().filter(named).collect();
+        if !own.is_empty() {
+            return own.into_iter().filter_map(spent).max();
+        }
+        let all: Vec<u64> = groups.iter().map(spent).collect::<Option<_>>()?;
+        // Free again as soon as the first group resets.
+        return if all.is_empty() { None } else { Some(all.iter().copied().filter(|&r| r > 0).min().unwrap_or(0)) };
+    }
+    let rejected = |v: &Value| v.get("status").and_then(Value::as_str) == Some("rejected");
+    let mut until = None;
+    if rejected(info) {
+        until = open(info.get("resetsAt").and_then(Value::as_u64));
+    }
+    for w in info.get("unifiedWindows").and_then(Value::as_object).into_iter().flat_map(|w| w.values()) {
+        if rejected(w) {
+            until = until.max(open(w.get("resetsAt").and_then(Value::as_u64)));
+        }
+    }
+    until
+}
+
+/// "14:30 UTC (in 2h 10m)" for a limit's reset; "unknown" for 0.
+fn limit_text(now: u64, until: u64) -> String {
+    if until == 0 {
+        return "unknown".into();
+    }
+    let mins = until.saturating_sub(now) / 60;
+    let day = until % 86400;
+    format!("{:02}:{:02} UTC (in {}h {}m)", day / 3600, day % 3600 / 60, mins / 60, mins % 60)
+}
+
+/// A limit bucket's reset in Unix seconds (`resets_at` or RFC 3339 `reset_time`).
+fn bucket_reset(b: &Value) -> Option<u64> {
+    b.get("resets_at").and_then(Value::as_u64).or_else(|| b.get("reset_time").and_then(Value::as_str).and_then(parse_rfc3339))
+}
+
 /// "5h 10% used (resets in 2h 10m)" for a reset time in Unix seconds.
 fn resets_in(now: u64, reset: u64) -> Option<String> {
     (reset > now).then(|| {
@@ -901,11 +1169,7 @@ fn usage_summary(info: Option<Value>) -> Value {
                     if let Some(left) = b.get("remaining_fraction").and_then(Value::as_f64) {
                         s.push_str(&format!(" {:.0}% used", (1.0 - left).clamp(0.0, 1.0) * 100.0));
                     }
-                    let reset = b
-                        .get("resets_at")
-                        .and_then(Value::as_u64)
-                        .or_else(|| b.get("reset_time").and_then(Value::as_str).and_then(parse_rfc3339));
-                    if let Some(text) = reset.and_then(|r| resets_in(now, r)) {
+                    if let Some(text) = bucket_reset(&b).and_then(|r| resets_in(now, r)) {
                         s.push_str(&text);
                     }
                     s
@@ -1235,6 +1499,94 @@ mod tests {
         );
     }
 
+    #[test]
+    fn limit_state_reads_claude_windows() {
+        let now = 1_000_000;
+        let ok = json!({ "unifiedWindows": {
+            "five_hour": { "status": "allowed_warning", "utilization": 0.95, "resetsAt": now + 600 },
+        }});
+        assert_eq!(limit_state(&ok, Some("sonnet"), now), None);
+        let hit = json!({ "unifiedWindows": {
+            "five_hour": { "status": "rejected", "utilization": 1.0, "resetsAt": now + 600 },
+            "seven_day": { "status": "rejected", "utilization": 1.0, "resetsAt": now + 9000 },
+            "seven_day_opus": { "status": "allowed", "utilization": 0.2 },
+        }});
+        assert_eq!(limit_state(&hit, None, now), Some(now + 9000), "free once every rejected window resets");
+        let past = json!({ "unifiedWindows": { "five_hour": { "status": "rejected", "resetsAt": now - 1 } } });
+        assert_eq!(limit_state(&past, None, now), None, "a reset in the past is stale");
+        assert_eq!(limit_state(&json!({ "status": "rejected" }), None, now), Some(0), "reset unknown");
+        assert_eq!(limit_state(&json!({ "status": "allowed" }), None, now), None);
+    }
+
+    #[test]
+    fn limit_state_picks_the_antigravity_group_by_model() {
+        let now = 1_000_000;
+        let info = json!({ "groups": [
+            { "name": "Gemini Models", "buckets": [
+                { "id": "gemini-5h", "window": "5h", "remaining_fraction": 0.4, "resets_at": now + 60 },
+            ]},
+            { "name": "Claude and GPT models", "buckets": [
+                { "id": "3p-5h", "window": "5h", "remaining_fraction": 0.0, "reset_time": "1970-01-12T14:00:00Z" },
+                { "id": "3p-weekly", "window": "weekly", "remaining_fraction": 0.5 },
+            ]},
+        ]});
+        let reset = parse_rfc3339("1970-01-12T14:00:00Z").unwrap();
+        assert!(reset > now);
+        assert_eq!(limit_state(&info, Some("gemini-3-pro"), now), None);
+        assert_eq!(limit_state(&info, Some("claude-opus-5-5"), now), Some(reset));
+        assert_eq!(limit_state(&info, Some("gpt-oss-120b"), now), Some(reset));
+        // Default model: the family is unclear, so one spent group isn't enough.
+        assert_eq!(limit_state(&info, None, now), None);
+        assert_eq!(limit_state(&info, Some("whatever"), now), None);
+        assert_eq!(limit_state(&info, Some("claude-opus-5-5"), reset), None, "reset has passed");
+
+        let all_spent = json!({ "groups": [
+            { "name": "Gemini Models", "buckets": [{ "remaining_fraction": 0.0, "resets_at": now + 500 }] },
+            { "name": "Claude and GPT models", "buckets": [{ "remaining_fraction": -0.1, "resets_at": now + 100 }] },
+        ]});
+        assert_eq!(limit_state(&all_spent, None, now), Some(now + 100), "free once the first group resets");
+        // Codex: one group, no family needed.
+        let codex = json!({ "groups": [{ "name": "codex", "buckets": [
+            { "id": "codex-primary", "window": "5h", "remaining_fraction": 0.0 },
+            { "id": "codex-secondary", "window": "weekly", "remaining_fraction": 0.3, "resets_at": now + 5 },
+        ]}]});
+        assert_eq!(limit_state(&codex, Some("gpt-5.5-codex"), now), Some(0));
+        assert_eq!(limit_state(&json!({ "groups": [] }), None, now), None);
+    }
+
+    #[test]
+    fn deepseek_has_no_limits() {
+        // dsh reports no plan limits, so there is no info to read.
+        assert_eq!(None::<Value>.and_then(|q| limit_state(&q, Some("deepseek-flash"), 0)), None);
+        assert_eq!(limit_state(&json!({}), Some(r#"["deepseek-account","deepseek-flash"]"#), 0), None);
+    }
+
+    #[test]
+    fn recognises_limit_errors() {
+        for yes in [
+            "You've hit your 5-hour limit · resets 1:30am",
+            "Claude AI usage limit reached|1795521870",
+            "Rate limit exceeded, try again later",
+            "UsageLimitExceeded: plan quota",
+            "error: RateLimitExceeded",
+            "RESOURCE_EXHAUSTED: quota for gemini-3-pro",
+            "Quota exceeded for this project",
+            "HTTP 429 Too Many Requests",
+        ] {
+            assert!(is_limit_error(yes), "{yes}");
+        }
+        for no in ["Internal error", "the agent refused the task", "You've hit your head", "connection reset", "lead session is gone"] {
+            assert!(!is_limit_error(no), "{no}");
+        }
+    }
+
+    #[test]
+    fn limit_times_read_for_the_lead() {
+        let until = 1795521870; // 2026-11-24T12:04:30Z
+        assert_eq!(limit_text(until - (2 * 3600 + 10 * 60 + 5), until), "12:04 UTC (in 2h 10m)");
+        assert_eq!(limit_text(until, 0), "unknown");
+    }
+
     /// (year, month, day) of a day count since 1970-01-01, to check parse_rfc3339 against.
     fn civil(z: i64) -> (i64, i64, i64) {
         let z = z + 719468;
@@ -1316,5 +1668,64 @@ mod tests {
             assert_eq!(schema["properties"]["attachments"]["items"]["type"], "string", "{name}");
             assert!(!schema["required"].as_array().unwrap().contains(&json!("attachments")), "{name}");
         }
+    }
+
+    #[test]
+    fn handoff_reassigns_only_matching_lead_tasks() {
+        let make_task = |id: &str, lead_agent: &str, lead_session: &str| {
+            let member: Member =
+                serde_json::from_value(json!({ "id": "m1", "name": "Member", "agentId": "dsh" })).unwrap();
+            Task {
+                info: TaskInfo {
+                    id: id.into(),
+                    lead_agent_id: lead_agent.into(),
+                    lead_session_id: lead_session.into(),
+                    title: format!("Task {id}"),
+                    member_id: member.id.clone(),
+                    member_name: member.name.clone(),
+                    agent_id: member.agent_id.clone(),
+                    session_id: Some(format!("sub-{id}")),
+                    status: "running".into(),
+                    writes: true,
+                    started_at: Some(100),
+                    ended_at: None,
+                    error: None,
+                    isolated: true,
+                    changes: Vec::new(),
+                    merge_state: None,
+                    conflicts: Vec::new(),
+                },
+                member,
+                cwd: "/work".into(),
+                result: String::new(),
+                answer: String::new(),
+                after_tool: false,
+                notes: Vec::new(),
+                cancel_requested: false,
+                sandbox: None,
+                attachments: Vec::new(),
+                reassigned: Vec::new(),
+            }
+        };
+
+        let mut tasks = HashMap::from([
+            ("t1".into(), make_task("t1", "claude", "old")),
+            ("t2".into(), make_task("t2", "claude", "old")),
+            ("t3".into(), make_task("t3", "claude", "other")),
+            ("t4".into(), make_task("t4", "codex", "old")),
+        ]);
+
+        let moved = Orchestra::reassign_tasks(&mut tasks, "claude", "old", "codex", "new");
+        let mut moved_ids: Vec<&str> = moved.iter().map(|t| t.id.as_str()).collect();
+        moved_ids.sort();
+        assert_eq!(moved_ids, ["t1", "t2"]);
+        for info in &moved {
+            assert_eq!(info.lead_agent_id, "codex");
+            assert_eq!(info.lead_session_id, "new");
+        }
+        assert_eq!((tasks["t1"].info.lead_agent_id.as_str(), tasks["t1"].info.lead_session_id.as_str()), ("codex", "new"));
+        assert_eq!((tasks["t2"].info.lead_agent_id.as_str(), tasks["t2"].info.lead_session_id.as_str()), ("codex", "new"));
+        assert_eq!((tasks["t3"].info.lead_agent_id.as_str(), tasks["t3"].info.lead_session_id.as_str()), ("claude", "other"));
+        assert_eq!((tasks["t4"].info.lead_agent_id.as_str(), tasks["t4"].info.lead_session_id.as_str()), ("codex", "old"));
     }
 }

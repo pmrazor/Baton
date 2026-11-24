@@ -7,7 +7,7 @@ export function fmtTokens(n: number) {
   return n >= 1000 ? `${(n / 1000).toFixed(1)}K` : String(n);
 }
 
-function fmtReset(ms: number) {
+export function fmtReset(ms: number) {
   const d = new Date(ms);
   const sameDay = d.toDateString() === new Date().toDateString();
   const time = d.toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" });
