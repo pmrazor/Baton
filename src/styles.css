@@ -1996,3 +1996,153 @@ body {
 .windows .title-bar {
   padding-right: 150px;
 }
+
+.archived-banner {
+  border-color: var(--border);
+}
+
+/* Finished task chats: folded under a toggle, dimmed when shown. */
+.session-row.child.done .session-main {
+  opacity: 0.6;
+}
+.session-row.child.done-toggle .session-main {
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.session-row.child.done-toggle .session-main::before {
+  display: none;
+}
+.rail-task.done {
+  opacity: 0.45;
+}
+
+/* Rail: fold toggle for finished tasks, and hover labels. */
+.rail-done-toggle {
+  height: 16px;
+  color: var(--muted);
+}
+.rail-done-toggle:hover {
+  color: var(--text);
+}
+.rail-tip {
+  position: fixed;
+  z-index: 60;
+  max-width: 280px;
+  padding: 5px 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  color: var(--text);
+  font-size: 12.5px;
+  line-height: 1.4;
+  pointer-events: none;
+  transform: translateY(-50%);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------- context compaction marker ---------- */
+.compaction-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 4px 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+}
+.compaction-head:disabled {
+  cursor: default;
+}
+.compaction-head:not(:disabled):hover {
+  color: var(--text-2);
+}
+.compaction-line {
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+.compaction-label {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+}
+.compaction.failed .compaction-label {
+  color: var(--danger);
+}
+.compaction-summary {
+  margin: 6px 0 2px;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-2);
+  font-size: 13.5px;
+  color: var(--text-2);
+}
+
+/* ---------- slash command menu ---------- */
+.composer {
+  position: relative;
+}
+.command-menu {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  z-index: 25;
+  max-height: 300px;
+  padding: 6px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+.command-menu button {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  text-align: left;
+}
+.command-menu button.selected {
+  background: var(--hover);
+}
+.command-name {
+  flex: none;
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--text);
+}
+.command-hint {
+  flex: none;
+  font-size: 12px;
+  color: var(--accent);
+}
+.command-desc {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12.5px;
+  color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.context-warn {
+  margin: 2px 0 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--warn);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--warn) 12%, transparent);
+  font-size: 12.5px;
+  line-height: 1.5;
+}

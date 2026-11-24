@@ -214,3 +214,62 @@ fn upgrade_builtins(agents: &mut [AgentDef]) -> bool {
     }
     changed
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dsh() -> AgentDef {
+        default_agents().into_iter().find(|a| a.id == "dsh").unwrap()
+    }
+
+    #[test]
+    fn unknown_launch_values_fall_back_to_defaults() {
+        let def = dsh();
+        let resolved = def.resolve_launch(&HashMap::new());
+        assert_eq!(resolved, vec![("permission".into(), "DSH_PERMISSION_MODE".into(), "workspace-write".into())]);
+
+        let bogus = HashMap::from([("permission".to_string(), "root".to_string())]);
+        assert_eq!(def.resolve_launch(&bogus)[0].2, "workspace-write");
+
+        let chosen = HashMap::from([("permission".to_string(), "read-only".to_string())]);
+        assert_eq!(def.resolve_launch(&chosen)[0].2, "read-only");
+    }
+
+    #[test]
+    fn old_configs_gain_new_builtin_fields_only() {
+        let mut old = dsh();
+        old.launch_options.clear();
+        old.lead_config.clear();
+        old.profile_env = None;
+        old.login_args.clear();
+        let mut custom = dsh();
+        custom.id = "my-agent".into();
+        custom.launch_options.clear();
+
+        let mut agents = vec![old, custom];
+        assert!(upgrade_builtins(&mut agents));
+        assert_eq!(agents[0].launch_options.len(), 1);
+        assert_eq!(agents[0].profile_env.as_deref(), Some("DSH_HOME"));
+        assert_eq!(agents[0].login_args, vec!["web".to_string()]);
+        assert!(!agents[0].lead_config.is_empty());
+        assert!(agents[1].launch_options.is_empty(), "user-defined agents are left alone");
+        assert!(!upgrade_builtins(&mut agents), "a second pass changes nothing");
+    }
+
+    #[test]
+    fn agents_json_is_created_then_reloaded() {
+        let dir = std::env::temp_dir().join(format!("baton-agents-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let first = load_or_init(&dir).unwrap();
+        assert!(config_path(&dir).exists());
+        let second = load_or_init(&dir).unwrap();
+        let ids = |a: &[AgentDef]| a.iter().map(|d| d.id.clone()).collect::<Vec<_>>();
+        assert_eq!(ids(&first), ids(&second));
+        assert_eq!(ids(&first), ["claude", "dsh"]);
+
+        std::fs::write(config_path(&dir), "not json").unwrap();
+        assert!(load_or_init(&dir).is_err(), "a broken file is reported, not overwritten");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

@@ -242,3 +242,44 @@ fn platform_command(command: &str, args: &[String]) -> Command {
         cmd
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn route(msg: Value) -> Option<Incoming> {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        route_message(msg, &tx);
+        rx.try_recv().ok()
+    }
+
+    #[test]
+    fn messages_are_sorted_by_shape() {
+        match route(json!({ "jsonrpc": "2.0", "id": "p1", "method": "session/request_permission", "params": { "a": 1 } })) {
+            Some(Incoming::Request { id, method, params }) => {
+                assert_eq!((id, method.as_str(), params), (json!("p1"), "session/request_permission", json!({ "a": 1 })));
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(
+            route(json!({ "jsonrpc": "2.0", "method": "session/update", "params": {} })),
+            Some(Incoming::Notification { method, .. }) if method == "session/update"
+        ));
+        // A null id is a notification, not a request.
+        assert!(matches!(
+            route(json!({ "jsonrpc": "2.0", "id": null, "method": "x" })),
+            Some(Incoming::Notification { .. })
+        ));
+        assert!(matches!(
+            route(json!({ "jsonrpc": "2.0", "id": 7, "result": { "ok": true } })),
+            Some(Incoming::Response { id: 7, result: Ok(v) }) if v == json!({ "ok": true })
+        ));
+        assert!(matches!(
+            route(json!({ "jsonrpc": "2.0", "id": 8, "error": { "code": -32000, "message": "auth required" } })),
+            Some(Incoming::Response { id: 8, result: Err(e) }) if e.code == -32000 && e.message == "auth required"
+        ));
+        // Responses to ids we never send (non-numeric) and junk are dropped.
+        assert!(route(json!({ "jsonrpc": "2.0", "id": "x", "result": {} })).is_none());
+        assert!(route(json!({ "hello": "world" })).is_none());
+    }
+}

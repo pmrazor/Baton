@@ -22,19 +22,23 @@ fn sessions_dir(workspace: &str) -> PathBuf {
     Path::new(workspace).join(BATON_DIR).join("sessions")
 }
 
-/// Create `.baton/sessions` (and a `.gitignore` keeping it out of git).
-/// Never creates the workspace itself: a deleted project stays deleted.
-fn ensure_sessions_dir(workspace: &str) -> Result<PathBuf, String> {
-    if !Path::new(workspace).is_dir() {
-        return Err(format!("작업 폴더가 없어요: {workspace}"));
+/// `<folder>/.baton/<sub>`, created along with a `.gitignore` keeping `.baton`
+/// out of git. Never creates the folder itself: a deleted project stays deleted.
+pub fn baton_subdir(folder: &Path, sub: &str) -> Result<PathBuf, String> {
+    if !folder.is_dir() {
+        return Err(format!("작업 폴더가 없어요: {}", folder.display()));
     }
-    let dir = sessions_dir(workspace);
+    let dir = folder.join(BATON_DIR).join(sub);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let ignore = Path::new(workspace).join(BATON_DIR).join(".gitignore");
+    let ignore = folder.join(BATON_DIR).join(".gitignore");
     if !ignore.exists() {
-        let _ = std::fs::write(&ignore, "# Baton chat history; not part of the project.\n*\n");
+        let _ = std::fs::write(&ignore, "# Baton app data; not part of the project.\n*\n");
     }
     Ok(dir)
+}
+
+fn ensure_sessions_dir(workspace: &str) -> Result<PathBuf, String> {
+    baton_subdir(Path::new(workspace), "sessions")
 }
 
 /// Session keys are `agentId:sessionId`; keep file names portable.

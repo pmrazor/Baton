@@ -280,6 +280,92 @@ pub fn merge(sb: &Sandbox, result: &str, list: &[Change], task_id: &str) -> Resu
 /// Delete the worktree folder and its git bookkeeping.
 pub fn remove(sb: &Sandbox) {
     // Unlink shared folders first so nothing can follow them on delete.
+    unlink(sb);
+    let _ = run(git(&sb.repo).arg("worktree").arg("remove").arg("--force").arg(&sb.path));
+    let _ = std::fs::remove_dir_all(&sb.path);
+    let _ = run(git(&sb.repo).args(["worktree", "prune"]));
+}
+
+const LOCK_FILE: &str = ".lock";
+
+/// This run's folder for worktrees, `<root>/<run_id>`. The returned file holds
+/// a lock for as long as the app runs, so another Baton window's cleanup
+/// leaves the folder alone.
+pub fn claim_run_dir(root: &Path, run_id: &str) -> std::io::Result<(PathBuf, std::fs::File)> {
+    let dir = root.join(run_id);
+    std::fs::create_dir_all(&dir)?;
+    let lock = std::fs::File::create(dir.join(LOCK_FILE))?;
+    lock.try_lock().map_err(std::io::Error::other)?;
+    Ok((dir, lock))
+}
+
+/// Remove worktrees left by earlier runs (the app quit before their tasks were
+/// merged or discarded). Changes nobody merged are first saved as a patch in
+/// the repository's `.baton/unmerged/`; returns those patch files.
+pub fn cleanup_orphans(root: &Path, keep: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(root) else { return Vec::new() };
+    let mut saved = Vec::new();
+    for dir in entries.flatten().map(|e| e.path()).filter(|p| p.is_dir() && p != keep) {
+        if dir.join(".git").is_file() {
+            // Worktree from a version without run folders.
+            saved.extend(remove_orphan(&dir));
+            continue;
+        }
+        let lock_path = dir.join(LOCK_FILE);
+        if lock_path.exists() {
+            let Ok(lock) = std::fs::File::open(&lock_path) else { continue };
+            if lock.try_lock().is_err() {
+                continue; // Another instance is still using it.
+            }
+            // Released before deleting: Windows can't delete an open file.
+        }
+        let Ok(children) = std::fs::read_dir(&dir) else { continue };
+        for child in children.flatten().map(|e| e.path()).filter(|p| p.join(".git").is_file()) {
+            saved.extend(remove_orphan(&child));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    saved
+}
+
+fn remove_orphan(path: &Path) -> Option<PathBuf> {
+    let linked: Vec<String> = LINKED_DIRS
+        .iter()
+        .filter(|d| path.join(d).symlink_metadata().is_ok_and(|m| m.file_type().is_symlink()))
+        .map(|d| d.to_string())
+        .collect();
+    let common = run_text(git(path).args(["rev-parse", "--path-format=absolute", "--git-common-dir"])).ok();
+    let repo = common.as_deref().map(Path::new).and_then(Path::parent).map(Path::to_path_buf);
+    let base = run_text(git(path).args(["rev-parse", "HEAD"])).ok();
+    let (Some(repo), Some(base)) = (repo, base) else {
+        // Its repository is gone: nothing to save or unregister.
+        let sb = Sandbox { repo: path.to_path_buf(), path: path.to_path_buf(), base: String::new(), linked };
+        unlink(&sb);
+        let _ = std::fs::remove_dir_all(path);
+        return None;
+    };
+    let sb = Sandbox { repo, path: path.to_path_buf(), base, linked };
+    let saved = save_patch(&sb);
+    remove(&sb);
+    saved
+}
+
+/// Write the worktree's changes since its base as `.baton/unmerged/<name>.patch`
+/// (apply with `git apply`). None when there were no changes.
+fn save_patch(sb: &Sandbox) -> Option<PathBuf> {
+    let name = sb.path.file_name()?.to_string_lossy().to_string();
+    let result = snapshot(&sb.path, &sb.linked, &format!("{name}-orphan")).ok()?;
+    let diff = run(git(&sb.repo).args(["diff", "--binary", &sb.base, &result])).ok()?;
+    if diff.is_empty() {
+        return None;
+    }
+    let dir = crate::history::baton_subdir(&sb.repo, "unmerged").ok()?;
+    let file = dir.join(format!("{name}.patch"));
+    std::fs::write(&file, diff).ok()?;
+    Some(file)
+}
+
+fn unlink(sb: &Sandbox) {
     for dir in &sb.linked {
         let link = sb.path.join(dir);
         #[cfg(unix)]
@@ -287,9 +373,6 @@ pub fn remove(sb: &Sandbox) {
         #[cfg(windows)]
         let _ = std::fs::remove_dir(&link);
     }
-    let _ = run(git(&sb.repo).arg("worktree").arg("remove").arg("--force").arg(&sb.path));
-    let _ = std::fs::remove_dir_all(&sb.path);
-    let _ = run(git(&sb.repo).args(["worktree", "prune"]));
 }
 
 #[cfg(test)]
@@ -373,6 +456,81 @@ mod tests {
         assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap(), "ONE\r\ntwo\r\nTHREE\r\n");
         assert_eq!(std::fs::read_to_string(repo.join("b.txt")).unwrap(), "task\r\n");
         remove(&sb);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn leftover_worktrees_are_saved_as_patches_and_removed() {
+        let root = std::env::temp_dir().join(format!("baton-wt-orphan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let repo = root.join("repo");
+        std::fs::create_dir_all(repo.join("node_modules")).unwrap();
+        sh(&repo, &["init", "-q"]);
+        std::fs::write(repo.join(".gitignore"), "node_modules/\n").unwrap();
+        std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+        sh(&repo, &["add", "."]);
+        sh(&repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init"]);
+        std::fs::write(repo.join("node_modules/dep.js"), "keep me").unwrap();
+
+        let wts = root.join("worktrees");
+        // An earlier run that quit with an unmerged task and a task that changed nothing.
+        let (old_run, old_lock) = claim_run_dir(&wts, "old1").unwrap();
+        let edited = create(&repo, &old_run, "old1-1").unwrap();
+        std::fs::write(edited.path.join("a.txt"), "one\ntask edit\n").unwrap();
+        std::fs::write(edited.path.join("new.txt"), "from task\n").unwrap();
+        let untouched = create(&repo, &old_run, "old1-2").unwrap();
+        drop(old_lock);
+        // Another window that is still running.
+        let (live_run, _live_lock) = claim_run_dir(&wts, "live").unwrap();
+        let live = create(&repo, &live_run, "live-1").unwrap();
+        // A worktree from before run folders existed.
+        let flat = create(&repo, &wts, "flat-1").unwrap();
+        // This run's own folder.
+        let (mine, _my_lock) = claim_run_dir(&wts, "mine").unwrap();
+
+        let saved = cleanup_orphans(&wts, &mine);
+
+        assert_eq!(saved.len(), 1, "only the edited task has something to save: {saved:?}");
+        // git reports the real path (macOS temp folders sit behind a /private symlink).
+        assert!(saved[0].starts_with(repo.canonicalize().unwrap().join(".baton/unmerged")), "{saved:?}");
+        assert!(!edited.path.exists() && !untouched.path.exists() && !flat.path.exists());
+        assert!(!old_run.exists(), "the finished run's folder is gone");
+        assert!(live.path.exists(), "a running instance's worktree is left alone");
+        assert!(mine.exists());
+        assert_eq!(std::fs::read_to_string(repo.join("node_modules/dep.js")).unwrap(), "keep me");
+        assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap(), "one\n", "the workspace is untouched");
+
+        // The patch brings the task's work back.
+        sh(&repo, &["apply", saved[0].to_str().unwrap()]);
+        assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap(), "one\ntask edit\n");
+        assert_eq!(std::fs::read_to_string(repo.join("new.txt")).unwrap(), "from task\n");
+
+        let worktrees = String::from_utf8(
+            Command::new("git").arg("-C").arg(&repo).args(["worktree", "list"]).output().unwrap().stdout,
+        )
+        .unwrap();
+        assert_eq!(worktrees.lines().count(), 2, "only the repo and the live worktree stay registered:\n{worktrees}");
+        remove(&live);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn worktrees_of_deleted_repos_are_just_deleted() {
+        let root = std::env::temp_dir().join(format!("baton-wt-gone-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        sh(&repo, &["init", "-q"]);
+        std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+        let wts = root.join("worktrees");
+        let (run, lock) = claim_run_dir(&wts, "r1").unwrap();
+        let sb = create(&repo, &run, "r1-1").unwrap();
+        std::fs::write(sb.path.join("a.txt"), "edit\n").unwrap();
+        drop(lock);
+        std::fs::remove_dir_all(&repo).unwrap();
+
+        assert!(cleanup_orphans(&wts, &wts.join("mine")).is_empty());
+        assert!(!run.exists());
         let _ = std::fs::remove_dir_all(&root);
     }
 }

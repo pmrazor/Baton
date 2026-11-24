@@ -25,7 +25,14 @@ const STORE = {
 };
 
 /** What goes to disk: everything except live-process state. */
-function toSaved({ busy: _busy, attached: _attached, draft: _draft, attachError: _attachError, ...rest }: Session) {
+function toSaved({
+  busy: _busy,
+  attached: _attached,
+  draft: _draft,
+  attachError: _attachError,
+  archived: _archived,
+  ...rest
+}: Session) {
   return rest;
 }
 
@@ -359,9 +366,14 @@ export default function App() {
   // A conversation restored from disk reconnects to its agent session when opened.
   // One attempt per opening: a failure is recorded and waits for the user's retry.
   useEffect(() => {
-    if (!foldersChecked || !active || active.attached || active.draft || active.attachError) return;
+    if (!foldersChecked || !active || active.attached || active.draft || active.attachError || active.archived) return;
     if (attaching.current === active.key) return;
     const s = active;
+    // A delegated task ran in a worktree that's gone after merge/discard; its chat is a record now.
+    if (s.parent && state.missing.includes(s.cwd)) {
+      dispatch({ type: "archived", key: s.key });
+      return;
+    }
     if (state.missing.includes(s.cwd)) {
       dispatch({ type: "attachFailed", key: s.key, error: `작업 폴더를 찾을 수 없어요: ${s.cwd}` });
       return;
@@ -530,7 +542,9 @@ export default function App() {
       <ChatView
         state={state}
         session={active}
-        connecting={connecting ?? (active && !active.attached && !active.attachError ? active.agentId : null)}
+        connecting={
+          connecting ?? (active && !active.attached && !active.attachError && !active.archived ? active.agentId : null)
+        }
         onRetryAttach={(key) => {
           // Re-check the folder first: it may have been restored.
           const cwd = state.sessions.find((s) => s.key === key)?.cwd;

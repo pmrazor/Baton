@@ -47,6 +47,12 @@ export interface State {
   teams: Team[];
   /** Workspace / chat folders that no longer exist on disk. */
   missing: string[];
+  /**
+   * Updates for sessions the UI hasn't registered yet. An agent can report
+   * (e.g. its slash commands) right after session/new, before the UI's own
+   * "session created" step runs; those are replayed when the session appears.
+   */
+  early: Record<string, unknown[]>;
 }
 
 export const initialState: State = {
@@ -64,6 +70,7 @@ export const initialState: State = {
   profiles: [],
   teams: [],
   missing: [],
+  early: {},
 };
 
 export type Action =
@@ -102,6 +109,7 @@ export type Action =
   | { type: "missing"; paths: string[] }
   | { type: "attachFailed"; key: string; error: string }
   | { type: "attachRetry"; key: string }
+  | { type: "archived"; key: string }
   | {
       type: "importSession";
       agentId: string;
@@ -190,8 +198,7 @@ export function reducer(state: State, action: Action): State {
         lastTurn: null,
       };
       return {
-        ...state,
-        sessions: [...state.sessions, session],
+        ...adopt(state, session),
         activeKey: key,
         workspace: action.cwd,
         authPrompt: null,
@@ -271,7 +278,9 @@ export function reducer(state: State, action: Action): State {
         items: [...s.items, { kind: "notice", id: nextId(), text: action.text, tone: action.tone }],
       }));
     case "update": {
-      const next = mapSession(state, sessionKey(action.agentId, action.sessionId), (s) => applyUpdate(s, action.update));
+      const key = sessionKey(action.agentId, action.sessionId);
+      const known = state.sessions.some((s) => s.key === key);
+      const next = known ? mapSession(state, key, (s) => applyUpdate(s, action.update)) : holdEarly(state, key, action.update);
       const quotas = quotasFromUpdate(action.update);
       if (quotas.length === 0) return next;
       const account = accountKey(action.agentId, action.profileId);
@@ -326,7 +335,7 @@ export function reducer(state: State, action: Action): State {
           text: "이 에이전트는 지난 대화 내용을 다시 보내 주지 않아 화면에는 없지만, 에이전트는 기억하고 있어요.",
         });
       }
-      return { ...state, sessions: [...state.sessions, session] };
+      return adopt(state, session);
     }
     case "modeSwitched":
       return mapSession(state, action.key, (s) => ({
@@ -345,6 +354,8 @@ export function reducer(state: State, action: Action): State {
     }
     case "attachFailed":
       return mapSession(state, action.key, (s) => ({ ...s, attachError: action.error }));
+    case "archived":
+      return mapSession(state, action.key, (s) => ({ ...s, archived: true }));
     case "attachRetry":
       return mapSession(state, action.key, (s) => ({ ...s, attachError: undefined }));
     case "leadTeam":
@@ -375,7 +386,7 @@ export function reducer(state: State, action: Action): State {
         usage: null,
         lastTurn: null,
       };
-      return applyTask({ ...state, sessions: [...state.sessions, sub] }, task);
+      return applyTask(adopt(state, sub), task);
     }
     case "taskBrief": {
       if (!action.task.sessionId) return state;
@@ -404,6 +415,27 @@ export function reducer(state: State, action: Action): State {
   }
 }
 
+const EARLY_PER_SESSION = 50;
+const EARLY_SESSIONS = 20;
+
+function holdEarly(state: State, key: string, update: unknown): State {
+  const early = { ...state.early, [key]: [...(state.early[key] ?? []), update].slice(-EARLY_PER_SESSION) };
+  // Sessions that never show up (closed drafts, debug leads) mustn't pile up.
+  const keys = Object.keys(early);
+  for (const k of keys.slice(0, Math.max(0, keys.length - EARLY_SESSIONS))) delete early[k];
+  return { ...state, early };
+}
+
+/** Add a session, first applying any updates that arrived before it. */
+function adopt(state: State, session: Session): State {
+  const pending = state.early[session.key] ?? [];
+  let s = session;
+  for (const u of pending) s = applyUpdate(s, u);
+  const early = { ...state.early };
+  delete early[session.key];
+  return { ...state, early, sessions: [...state.sessions, s] };
+}
+
 /** Record a task's status on its lead, and mirror it on the task's own chat. */
 function applyTask(state: State, task: TaskInfo): State {
   const leadKey = sessionKey(task.leadAgentId, task.leadSessionId);
@@ -429,6 +461,31 @@ function applyTask(state: State, task: TaskInfo): State {
     }));
   }
   return next;
+}
+
+const blocksText = (blocks: any[] | null | undefined) =>
+  (blocks ?? []).map((b) => (b?.type === "text" ? (b.text ?? "") : "")).join("");
+
+/**
+ * Upsert a compaction marker. `compaction_update` patches status/summary/error
+ * (an omitted field keeps its value); `compaction_summary_chunk` appends text.
+ */
+function applyCompaction(items: ChatItem[], u: any): ChatItem[] {
+  const id = String(u.compactionId ?? "");
+  const idx = items.findIndex((i) => i.kind === "compaction" && i.compactionId === id);
+  const prev =
+    idx >= 0
+      ? (items[idx] as Extract<ChatItem, { kind: "compaction" }>)
+      : ({ kind: "compaction", id: nextId(), compactionId: id, status: "in_progress", summary: "" } as const);
+  let next: Extract<ChatItem, { kind: "compaction" }> = { ...prev };
+  if (u.sessionUpdate === "compaction_summary_chunk") {
+    next.summary = prev.summary + (u.content?.type === "text" ? (u.content.text ?? "") : "");
+  } else {
+    if (u.status) next.status = u.status;
+    if (u.summary !== undefined) next.summary = blocksText(u.summary);
+    if (u.error !== undefined) next.error = u.error;
+  }
+  return idx >= 0 ? items.map((it, i) => (i === idx ? next : it)) : [...items, next];
 }
 
 /** When a turn ends, record how long it took on the message that started it. */
@@ -531,6 +588,18 @@ function applyUpdate(s: Session, u: any, replay = false): Session {
       const items = idx >= 0 ? s.items.map((it, n) => (n === idx ? plan : it)) : [...s.items, plan];
       return { ...s, items };
     }
+    case "compaction_update":
+    case "compaction_summary_chunk":
+      return { ...s, items: applyCompaction(s.items, u) };
+    case "available_commands_update":
+      return {
+        ...s,
+        commands: (u.availableCommands ?? []).map((c: any) => ({
+          name: String(c.name),
+          description: String(c.description ?? ""),
+          hint: c.input?.hint ?? undefined,
+        })),
+      };
     case "config_option_update":
       return { ...s, configOptions: u.configOptions ?? s.configOptions };
     case "current_mode_update":

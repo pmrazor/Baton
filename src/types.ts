@@ -112,7 +112,24 @@ export type ChatItem =
   | { kind: "thought"; id: string; text: string }
   | ({ kind: "tool"; id: string; toolKind: string } & Omit<ToolCallFields, "kind">)
   | { kind: "plan"; id: string; entries: PlanEntry[] }
-  | { kind: "notice"; id: string; text: string; tone: "info" | "error" };
+  | { kind: "notice"; id: string; text: string; tone: "info" | "error" }
+  /** The agent condensed earlier history to stay within its context window. */
+  | {
+      kind: "compaction";
+      id: string;
+      compactionId: string;
+      status: "in_progress" | "completed" | "failed" | "cancelled" | string;
+      summary: string;
+      error?: string | null;
+    };
+
+/** A slash command the agent accepts (ACP `available_commands_update`). */
+export interface AgentCommand {
+  name: string;
+  description: string;
+  /** Shown when the command takes free text after its name. */
+  hint?: string;
+}
 
 export interface SelectOption {
   value: string;
@@ -156,6 +173,10 @@ export interface Session {
   launch: Launch;
   /** Why reconnecting failed; set to stop automatic retries until the user asks. */
   attachError?: string;
+  /** A finished task whose worktree was cleaned up: history only, no reconnecting. */
+  archived?: boolean;
+  /** Slash commands the agent advertised for this session. */
+  commands?: AgentCommand[];
   /** Set on a lead (agent mode) conversation. */
   lead?: { teamId: string };
   /** Tasks this lead handed out, newest last. */

@@ -270,7 +270,9 @@ impl Hub {
             "clientCapabilities": {
                 "fs": { "readTextFile": false, "writeTextFile": false },
                 "terminal": false,
-                "auth": { "terminal": true }
+                "auth": { "terminal": true },
+                // Agents only report context compaction to clients that ask for it.
+                "session": { "compaction": {} }
             },
             "clientInfo": { "name": "baton", "version": env!("CARGO_PKG_VERSION") }
         });

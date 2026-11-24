@@ -167,3 +167,58 @@ impl Teams {
         std::fs::write(&self.file, text).map_err(|e| e.to_string())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auto_team_is_valid() {
+        let team = auto_team();
+        let mut ids: Vec<&str> = team.members.iter().map(|m| m.id.as_str()).collect();
+        let count = ids.len();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), count, "member ids must be unique");
+        assert!(team.members.iter().all(|m| !m.role.is_empty() && m.config.contains_key("model")));
+        assert_eq!(team.isolation, "worktree");
+    }
+
+    #[test]
+    fn user_teams_persist_and_the_auto_team_is_protected() {
+        let dir = std::env::temp_dir().join(format!("baton-teams-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let teams = Teams::load(&dir);
+        assert!(teams.save_team(auto_team()).is_err());
+
+        let mut mine = auto_team();
+        mine.id = "t1".into();
+        mine.name = "Mine".into();
+        mine.members.truncate(1);
+        teams.save_team(mine.clone()).unwrap();
+        mine.name = "Renamed".into();
+        teams.save_team(mine).unwrap();
+
+        let reloaded = Teams::load(&dir);
+        let ids: Vec<String> = reloaded.all().into_iter().map(|t| t.id).collect();
+        assert_eq!(ids, ["auto", "t1"], "auto first, and saving twice replaces");
+        assert_eq!(reloaded.get("t1").name, "Renamed");
+        assert_eq!(reloaded.get("gone").id, AUTO_TEAM, "an unknown team falls back to auto");
+
+        reloaded.delete("t1").unwrap();
+        assert_eq!(Teams::load(&dir).all().len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn older_team_files_get_defaults() {
+        let team: Team = serde_json::from_value(json!({
+            "id": "old", "name": "Old",
+            "members": [{ "id": "m", "name": "M", "agentId": "claude" }]
+        }))
+        .unwrap();
+        assert_eq!(team.max_parallel, 3);
+        assert_eq!(team.isolation, "worktree");
+        assert_eq!(team.members[0].profile_id, "default");
+    }
+}

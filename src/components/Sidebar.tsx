@@ -1,7 +1,8 @@
-import { Fragment, useState } from "react";
+import { Fragment, useState, type MouseEvent } from "react";
 import {
   ChevronDown,
   ChevronRight,
+  ChevronUp,
   Folder,
   FolderOpen,
   FolderPlus,
@@ -15,9 +16,8 @@ import {
   Workflow,
   X,
 } from "lucide-react";
-import type { AgentInfo, PermissionRequest, Session } from "../types";
+import { isTaskActive, sessionKey, type AgentInfo, type PermissionRequest, type Session } from "../types";
 import logo from "../assets/logo.png";
-import { sessionKey } from "../types";
 
 interface Props {
   agents: AgentInfo[];
@@ -53,6 +53,8 @@ function relativeTime(ts: number) {
 
 export default function Sidebar(p: Props) {
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+  // Leads whose finished tasks are unfolded.
+  const [showDone, setShowDone] = useState<Record<string, boolean>>({});
   const waiting = new Set(p.permissions.map((r) => sessionKey(r.agentId, r.sessionId)));
 
   if (p.rail) return <Rail {...p} waiting={waiting} />;
@@ -152,17 +154,39 @@ export default function Sidebar(p: Props) {
                       <X size={13} />
                     </button>
                   </div>
-                  {childrenOf(s).map((c) => {
-                    const tone = taskTone(s, c, waiting);
-                    return (
-                      <div key={c.key} className={`session-row child ${c.key === p.activeKey ? "active" : ""}`}>
+                  {(() => {
+                    const { active, finished } = splitTasks(s, childrenOf(s), waiting);
+                    const row = (c: Session, done: boolean) => (
+                      <div
+                        key={c.key}
+                        className={`session-row child ${done ? "done" : ""} ${c.key === p.activeKey ? "active" : ""}`}
+                      >
                         <button className="session-main" onClick={() => p.onActivate(c.key)}>
-                          <span className={`dot task-dot ${tone}`} />
+                          <span className={`dot task-dot ${taskTone(s, c, waiting)}`} />
                           <span className="ellipsis">{c.title}</span>
                         </button>
                       </div>
                     );
-                  })}
+                    // Keep the open chat visible even if its group is folded.
+                    const open = showDone[s.key] || finished.some((c) => c.key === p.activeKey);
+                    return (
+                      <>
+                        {active.map((c) => row(c, false))}
+                        {finished.length > 0 && (
+                          <div className="session-row child done-toggle">
+                            <button
+                              className="session-main"
+                              onClick={() => setShowDone((o) => ({ ...o, [s.key]: !open }))}
+                            >
+                              {open ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+                              <span className="ellipsis">완료된 작업 {finished.length}개</span>
+                            </button>
+                          </div>
+                        )}
+                        {open && finished.map((c) => row(c, true))}
+                      </>
+                    );
+                  })()}
                   </Fragment>
                 ))}
             </div>
@@ -179,6 +203,18 @@ export default function Sidebar(p: Props) {
 }
 
 /** Status colour of a task chat, from its lead's task record. */
+/**
+ * Split a lead's task chats: still in play (running, queued, asking
+ * permission, or awaiting a merge decision) vs. finished.
+ */
+function splitTasks(lead: Session, children: Session[], waiting: Set<string>) {
+  const inPlay = (c: Session) => {
+    const task = lead.tasks?.find((t) => t.id === c.parent?.taskId);
+    return waiting.has(c.key) || c.busy || (!!task && (isTaskActive(task.status) || task.mergeState === "pending"));
+  };
+  return { active: children.filter(inPlay), finished: children.filter((c) => !inPlay(c)) };
+}
+
 function taskTone(lead: Session, child: Session, waiting: Set<string>) {
   const task = lead.tasks?.find((t) => t.id === child.parent?.taskId);
   if (waiting.has(child.key)) return "wait";
@@ -188,25 +224,62 @@ function taskTone(lead: Session, child: Session, waiting: Set<string>) {
   return "idle";
 }
 
+const TASK_STATE: Record<string, string> = {
+  queued: "대기열",
+  starting: "시작 중",
+  waiting_lock: "대기",
+  running: "실행 중",
+  done: "완료",
+  failed: "실패",
+  cancelled: "중단됨",
+};
+
+/** "README 갱신 · 실행 중": a task chat's title and where it stands. */
+function taskLabel(lead: Session, child: Session, waiting: Set<string>) {
+  const task = lead.tasks?.find((t) => t.id === child.parent?.taskId);
+  const state = waiting.has(child.key)
+    ? "권한 요청"
+    : task?.mergeState === "pending" && !isTaskActive(task.status)
+      ? "병합 대기"
+      : task
+        ? TASK_STATE[task.status]
+        : null;
+  return state ? `${child.title} · ${state}` : child.title;
+}
+
+type Tip = { text: string; x: number; y: number };
+
 function Rail(p: Props & { waiting: Set<string> }) {
   // Workspaces whose chats are unfolded under their letter.
   const [open, setOpen] = useState<Record<string, boolean>>(() => (p.workspace ? { [p.workspace]: true } : {}));
+  // Leads whose finished tasks are unfolded.
+  const [showDone, setShowDone] = useState<Record<string, boolean>>({});
+  // The rail scrolls, which would clip a CSS tooltip, so draw one fixed beside the hovered item.
+  const [tip, setTip] = useState<Tip | null>(null);
+  const tipFor = (text: string) => ({
+    "aria-label": text,
+    onMouseEnter: (e: MouseEvent<HTMLElement>) => {
+      const r = e.currentTarget.getBoundingClientRect();
+      setTip({ text, x: r.right + 8, y: r.top + r.height / 2 });
+    },
+    onMouseLeave: () => setTip(null),
+  });
 
   return (
-    <aside className="sidebar rail">
+    <aside className="sidebar rail" onScroll={() => setTip(null)}>
       <div className="rail-top" data-tauri-drag-region>
-        <button className="rail-logo" title="사이드바 펼치기" onClick={p.onToggleRail}>
+        <button className="rail-logo" onClick={p.onToggleRail} {...tipFor("사이드바 펼치기")}>
           <img src={logo} alt="" />
           <PanelLeftOpen size={18} className="rail-logo-hover" />
         </button>
       </div>
-      <button className="icon-btn rail-btn" title="새 대화" onClick={() => p.onNewChat()}>
+      <button className="icon-btn rail-btn" onClick={() => p.onNewChat()} {...tipFor("새 대화")}>
         <SquarePen size={18} />
       </button>
 
       <div className="rail-divider" />
 
-      <nav className="rail-workspaces">
+      <nav className="rail-workspaces" onScroll={() => setTip(null)}>
         {p.workspaces.map((ws) => {
           const all = p.sessions.filter((s) => s.cwd === ws);
           const flag = all.some((s) => p.waiting.has(s.key)) ? "waiting" : all.some((s) => s.busy) ? "busy" : null;
@@ -219,12 +292,12 @@ function Rail(p: Props & { waiting: Set<string> }) {
             <div key={ws} className={`rail-group ${isOpen ? "open" : ""}`}>
               <button
                 className={`rail-ws ${ws === p.workspace ? "selected" : ""} ${p.missing.includes(ws) ? "missing" : ""}`}
-                title={p.missing.includes(ws) ? `${name}\n폴더를 찾을 수 없어요: ${ws}` : `${name}\n${ws}`}
                 aria-expanded={isOpen}
                 onClick={() => {
                   p.onSelectWorkspace(ws);
                   setOpen((o) => ({ ...o, [ws]: !o[ws] }));
                 }}
+                {...tipFor(p.missing.includes(ws) ? `${name} · 폴더를 찾을 수 없어요` : name)}
               >
                 {name.charAt(0).toUpperCase()}
                 {flag && !isOpen && <span className={`rail-badge ${flag}`} />}
@@ -232,21 +305,34 @@ function Rail(p: Props & { waiting: Set<string> }) {
               {isOpen && (
                 <div className="rail-chats">
                   {chats.length === 0 && (
-                    <button className="icon-btn rail-chat" title="이 폴더에서 새 대화" onClick={() => p.onNewChat(ws)}>
+                    <button className="icon-btn rail-chat" onClick={() => p.onNewChat(ws)} {...tipFor("이 폴더에서 새 대화")}>
                       <SquarePen size={15} />
                     </button>
                   )}
                   {chats.map((c) => {
                     const Icon = c.lead ? Workflow : MessageSquare;
-                    const children = p.sessions
-                      .filter((s) => s.parent?.key === c.key)
-                      .sort((a, b) => a.createdAt - b.createdAt);
+                    const { active, finished } = splitTasks(
+                      c,
+                      p.sessions.filter((s) => s.parent?.key === c.key).sort((a, b) => a.createdAt - b.createdAt),
+                      p.waiting,
+                    );
+                    const doneOpen = showDone[c.key] || finished.some((f) => f.key === p.activeKey);
+                    const dot = (t: Session, done: boolean) => (
+                      <button
+                        key={t.key}
+                        className={`rail-task ${done ? "done" : ""} ${t.key === p.activeKey ? "active" : ""}`}
+                        onClick={() => p.onActivate(t.key)}
+                        {...tipFor(taskLabel(c, t, p.waiting))}
+                      >
+                        <span className={`dot task-dot ${taskTone(c, t, p.waiting)}`} />
+                      </button>
+                    );
                     return (
                       <Fragment key={c.key}>
                         <button
                           className={`rail-chat ${c.key === p.activeKey ? "active" : ""} ${c.lead ? "lead" : ""}`}
-                          title={c.title}
                           onClick={() => p.onActivate(c.key)}
+                          {...tipFor(c.lead ? `${c.title} · 총괄` : c.title)}
                         >
                           <Icon size={15} />
                           {p.waiting.has(c.key) ? (
@@ -255,16 +341,18 @@ function Rail(p: Props & { waiting: Set<string> }) {
                             c.busy && <span className="rail-badge busy" />
                           )}
                         </button>
-                        {children.map((t) => (
+                        {active.map((t) => dot(t, false))}
+                        {finished.length > 0 && (
                           <button
-                            key={t.key}
-                            className={`rail-task ${t.key === p.activeKey ? "active" : ""}`}
-                            title={t.title}
-                            onClick={() => p.onActivate(t.key)}
+                            className="rail-task rail-done-toggle"
+                            aria-expanded={doneOpen}
+                            onClick={() => setShowDone((o) => ({ ...o, [c.key]: !doneOpen }))}
+                            {...tipFor(`완료된 작업 ${finished.length}개 ${doneOpen ? "접기" : "펼치기"}`)}
                           >
-                            <span className={`dot task-dot ${taskTone(c, t, p.waiting)}`} />
+                            {doneOpen ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
                           </button>
-                        ))}
+                        )}
+                        {doneOpen && finished.map((t) => dot(t, true))}
                       </Fragment>
                     );
                   })}
@@ -273,14 +361,19 @@ function Rail(p: Props & { waiting: Set<string> }) {
             </div>
           );
         })}
-        <button className="icon-btn rail-btn" title="폴더 추가" onClick={p.onAddWorkspace}>
+        <button className="icon-btn rail-btn" onClick={p.onAddWorkspace} {...tipFor("폴더 추가")}>
           <FolderPlus size={18} />
         </button>
       </nav>
 
-      <button className="icon-btn rail-btn" title="설정" onClick={p.onOpenSettings}>
+      <button className="icon-btn rail-btn" onClick={p.onOpenSettings} {...tipFor("설정")}>
         <Settings size={18} />
       </button>
+      {tip && (
+        <div className="rail-tip" style={{ left: tip.x, top: tip.y }} role="tooltip">
+          {tip.text}
+        </div>
+      )}
     </aside>
   );
 }

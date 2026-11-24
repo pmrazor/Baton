@@ -141,7 +141,13 @@ pub struct Orchestra {
     by_session: Mutex<HashMap<(String, String), String>>,
     write_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     next_task: AtomicU64,
+    /// Per-run prefix for task ids. Leads keep their task lists across restarts,
+    /// so a bare counter would hand out "t1" again and collide with old tasks.
+    run_id: String,
+    /// This run's worktrees; earlier runs' leftovers are cleaned up at start.
     worktrees_dir: std::path::PathBuf,
+    /// Held while the app runs so other instances don't clean up our worktrees.
+    _run_lock: Option<std::fs::File>,
 }
 
 impl Orchestra {
@@ -161,20 +167,36 @@ impl Orchestra {
                 Err(e) => eprintln!("baton MCP server failed to start: {e}"),
             }
         });
-        let worktrees_dir = app
+        let root = app
             .path()
             .app_data_dir()
             .map(|d| d.join("worktrees"))
             .unwrap_or_else(|_| std::env::temp_dir().join("baton-worktrees"));
+        let run_id = random_token()[..4].to_string();
+        let (worktrees_dir, run_lock) = match worktree::claim_run_dir(&root, &run_id) {
+            Ok((dir, lock)) => (dir, Some(lock)),
+            Err(e) => {
+                eprintln!("worktree folder lock failed: {e}");
+                (root.join(&run_id), None)
+            }
+        };
+        let keep = worktrees_dir.clone();
+        std::thread::spawn(move || {
+            for patch in worktree::cleanup_orphans(&root, &keep) {
+                eprintln!("saved unmerged task changes to {}", patch.display());
+            }
+        });
         Ok(Self {
             app,
             port,
             worktrees_dir,
+            _run_lock: run_lock,
             leads: Default::default(),
             tasks: Default::default(),
             by_session: Default::default(),
             write_locks: Default::default(),
             next_task: AtomicU64::new(1),
+            run_id,
         })
     }
 
@@ -230,16 +252,8 @@ impl Orchestra {
             .values()
             .find(|l| l.agent_id == agent_id && l.session_id.as_deref() == Some(session_id))
             .map(|l| l.team_id.clone());
-        match team_id {
-            Some(team_id) => {
-                let team = self.app.state::<Teams>().get(&team_id);
-                format!(
-                    "{LEAD_PREAMBLE}Current team: \"{}\". If it differs from the team you last listed, call list_agents again.\n[User message]\n{text}",
-                    team.name
-                )
-            }
-            None => text.to_string(),
-        }
+        let team = team_id.map(|id| self.app.state::<Teams>().get(&id).name);
+        wrap_lead_text(text, team.as_deref())
     }
 
     /// Switch a lead's team; applies to its next delegations.
@@ -396,7 +410,7 @@ impl Orchestra {
         let isolated =
             writes && team.isolation == "worktree" && worktree::repo_root(std::path::Path::new(&lead.cwd)).is_some();
 
-        let id = format!("t{}", self.next_task.fetch_add(1, Ordering::Relaxed));
+        let id = format!("{}-{}", self.run_id, self.next_task.fetch_add(1, Ordering::Relaxed));
         let info = TaskInfo {
             id: id.clone(),
             lead_agent_id: lead.agent_id.clone(),
@@ -752,6 +766,19 @@ async fn run_turn(app: AppHandle, token: String, task_id: String, message: Strin
     orch.set_status(&task_id, status);
 }
 
+/// A lead's user message with the agent-mode note in front; `team` is None
+/// for a session that isn't a lead.
+fn wrap_lead_text(text: &str, team: Option<&str>) -> String {
+    // A slash command (/compact, …) only works as the very start of the
+    // message; anything in front turns it into plain text.
+    match team {
+        Some(team) if !text.trim_start().starts_with('/') => format!(
+            "{LEAD_PREAMBLE}Current team: \"{team}\". If it differs from the team you last listed, call list_agents again.\n[User message]\n{text}"
+        ),
+        _ => text.to_string(),
+    }
+}
+
 fn fail(orch: &Orchestra, task_id: &str, message: &str) {
     if let Some(t) = orch.tasks.lock().unwrap().get_mut(task_id) {
         t.info.error = Some(message.into());
@@ -910,4 +937,56 @@ async fn handle_mcp(State(app): State<AppHandle>, headers: HeaderMap, Json(msg):
         Err((code, message)) => json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } }),
     };
     Json(body).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lead_messages_get_the_agent_mode_note() {
+        let wrapped = wrap_lead_text("fix the login bug", Some("자동"));
+        assert!(wrapped.starts_with(LEAD_PREAMBLE));
+        assert!(wrapped.contains("Current team: \"자동\""));
+        assert!(wrapped.ends_with("[User message]\nfix the login bug"));
+    }
+
+    #[test]
+    fn slash_commands_and_plain_chats_pass_through() {
+        assert_eq!(wrap_lead_text("/compact", Some("자동")), "/compact");
+        assert_eq!(wrap_lead_text("  /compact keep the plan", Some("자동")), "  /compact keep the plan");
+        assert_eq!(wrap_lead_text("hello", None), "hello");
+    }
+
+    #[test]
+    fn usage_summary_reads_claude_rate_limits() {
+        assert_eq!(usage_summary(None), Value::Null);
+        assert_eq!(usage_summary(Some(json!({ "status": "allowed" }))), json!("allowed"));
+
+        let in_2h_10m = now_ms() / 1000 + 2 * 3600 + 10 * 60 + 30;
+        let info = json!({ "unifiedWindows": {
+            "five_hour": { "utilization": 0.1, "status": "allowed", "resetsAt": in_2h_10m },
+            "seven_day": { "utilization": 87, "status": "allowed_warning", "resetsAt": 1 },
+        }});
+        let text = usage_summary(Some(info));
+        let text = text.as_str().unwrap();
+        assert!(text.contains("five_hour 10% used (resets in 2h 10m)"), "{text}");
+        // Percent given as 0–100 stays as is; a reset in the past is dropped.
+        assert!(text.contains("seven_day 87% used [allowed_warning]"), "{text}");
+        assert!(!text.contains("seven_day 87% used [allowed_warning] (resets"), "{text}");
+    }
+
+    #[test]
+    fn every_listed_tool_has_a_schema() {
+        let tools = tool_list();
+        let names: Vec<&str> = tools.as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert_eq!(
+            names,
+            ["list_agents", "delegate", "wait", "get_result", "send_followup", "merge_task", "discard_task", "cancel"]
+        );
+        for tool in tools.as_array().unwrap() {
+            assert_eq!(tool["inputSchema"]["type"], "object", "{}", tool["name"]);
+            assert!(!tool["description"].as_str().unwrap().is_empty());
+        }
+    }
 }

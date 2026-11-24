@@ -1,5 +1,6 @@
-# Builds installers for every platform and uploads them, with signed updater
-# files and latest.json, to a draft GitHub release.
+# Runs the tests (ci.yml), then builds installers for every platform and
+# uploads them, with signed updater files and latest.json, to a draft GitHub
+# release. Nothing is built if a test fails.
 #
 # Run it by pushing a version tag (git tag v0.1.0-alpha.1 && git push origin --tags)
 # or from the Actions tab. Review the draft, then publish it as a normal
@@ -20,7 +21,11 @@ permissions:
   contents: write
 
 jobs:
+  test:
+    uses: ./.github/workflows/ci.yml
+
   build:
+    needs: test
     strategy:
       fail-fast: false
       matrix:

@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import type { AccountUsage, AuthStatus, QuotaEntry, Session } from "../types";
+import type { AccountUsage, AgentCommand, AuthStatus, QuotaEntry, Session } from "../types";
 import { Popover } from "./Popover";
 
 export function fmtTokens(n: number) {
@@ -25,10 +25,14 @@ interface Props {
   agentName: string;
   account: AccountUsage | null;
   identity?: AuthStatus;
+  commands?: AgentCommand[];
 }
 
+/** Past this share of the context window, warn that compaction is near. */
+const CONTEXT_WARN = 0.8;
+
 /** Context ring in the composer; click for session + account usage. */
-export default function UsageButton({ session, agentName, account, identity }: Props) {
+export default function UsageButton({ session, agentName, account, identity, commands }: Props) {
   const u = session?.usage;
   const ratio = u && u.size > 0 ? Math.min(1, u.used / u.size) : 0;
   const entries = Object.values(account?.entries ?? {});
@@ -60,6 +64,17 @@ export default function UsageButton({ session, agentName, account, identity }: P
                 <span className="muted">—</span>
               )}
             </Row>
+            {ratio >= CONTEXT_WARN && (
+              <div className="context-warn">
+                컨텍스트가 {Math.round(ratio * 100)}% 찼어요. 더 차면 에이전트가 앞부분을 자동으로 요약해요.
+                {commands?.some((c) => c.name === "compact") && (
+                  <>
+                    {" "}
+                    지금 정리하려면 입력창에 <code>/compact</code>를 보내세요.
+                  </>
+                )}
+              </div>
+            )}
             {session?.lastTurn && (
               <Row label="마지막 응답">
                 <span>

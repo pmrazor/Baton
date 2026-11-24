@@ -71,9 +71,23 @@ function classify(options: ConfigOption[]) {
 
 export default function Composer(p: Props) {
   const [draft, setDraft] = useState("");
+  // Slash-command menu: open while the draft is "/word" with no space yet.
+  const [cmdIndex, setCmdIndex] = useState(0);
+  const [cmdDismissed, setCmdDismissed] = useState(false);
+  const commands = p.session?.commands ?? [];
+  const slash = /^\/(\S*)$/.exec(draft);
+  const matches =
+    slash && !cmdDismissed
+      ? commands.filter((c) => c.name.toLowerCase().startsWith(slash[1].toLowerCase())).slice(0, 8)
+      : [];
+  const pickCommand = (name: string) => {
+    setDraft(`/${name} `);
+    setCmdDismissed(true);
+    textRef.current?.focus();
+  };
   const textRef = useRef<HTMLTextAreaElement>(null);
   const busy = p.session?.busy ?? false;
-  const ready = !!p.session && !p.connecting && !p.session.attachError;
+  const ready = !!p.session && !p.connecting && !p.session.attachError && !p.session.archived;
   const { mode, model, effort, rest } = classify(p.session?.configOptions ?? []);
   const agent = p.agents.find((a) => a.id === p.agentId);
   const sessionModes = !mode && p.session?.modes && p.session.modes.availableModes.length > 1 ? p.session.modes : null;
@@ -117,6 +131,27 @@ export default function Composer(p: Props) {
         </div>
       )}
       <div className="composer">
+        {matches.length > 0 && (
+          <div className="command-menu" role="listbox" aria-label="명령">
+            {matches.map((c, i) => (
+              <button
+                key={c.name}
+                role="option"
+                aria-selected={i === Math.min(cmdIndex, matches.length - 1)}
+                className={i === Math.min(cmdIndex, matches.length - 1) ? "selected" : ""}
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  pickCommand(c.name);
+                }}
+                onMouseEnter={() => setCmdIndex(i)}
+              >
+                <span className="command-name">/{c.name}</span>
+                {c.hint && <span className="command-hint">{c.hint}</span>}
+                <span className="command-desc">{c.description}</span>
+              </button>
+            ))}
+          </div>
+        )}
         <textarea
           ref={textRef}
           value={draft}
@@ -124,6 +159,8 @@ export default function Composer(p: Props) {
           placeholder={
             p.connecting
               ? `${agent?.name ?? "에이전트"} 연결 중…`
+              : p.session?.archived
+                ? "끝난 작업은 이어서 대화할 수 없어요"
               : p.session?.attachError
                 ? "연결되지 않은 대화예요 · 위의 [다시 시도]를 눌러 주세요"
               : p.isTask
@@ -132,8 +169,31 @@ export default function Composer(p: Props) {
                   ? "총괄에게 지시하기"
                   : "에이전트에게 메시지 보내기"
           }
-          onChange={(e) => setDraft(e.target.value)}
+          onChange={(e) => {
+            setDraft(e.target.value);
+            setCmdDismissed(false);
+            setCmdIndex(0);
+          }}
           onKeyDown={(e) => {
+            if (matches.length > 0 && !e.nativeEvent.isComposing) {
+              const at = Math.min(cmdIndex, matches.length - 1);
+              if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+                e.preventDefault();
+                const step = e.key === "ArrowDown" ? 1 : matches.length - 1;
+                setCmdIndex((at + step) % matches.length);
+                return;
+              }
+              if ((e.key === "Enter" && !e.shiftKey) || e.key === "Tab") {
+                e.preventDefault();
+                pickCommand(matches[at].name);
+                return;
+              }
+              if (e.key === "Escape") {
+                e.preventDefault();
+                setCmdDismissed(true);
+                return;
+              }
+            }
             if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
               e.preventDefault();
               submit();
@@ -371,6 +431,7 @@ export default function Composer(p: Props) {
           </Popover>
         )}
         <UsageButton
+          commands={commands}
           session={p.session}
           agentName={p.accountName}
           account={p.accountUsage}

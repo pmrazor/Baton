@@ -72,7 +72,12 @@ async fn main() {
             "initialize",
             json!({
                 "protocolVersion": PROTOCOL_VERSION,
-                "clientCapabilities": { "fs": { "readTextFile": false, "writeTextFile": false }, "terminal": false, "auth": { "terminal": true } },
+                "clientCapabilities": {
+                    "fs": { "readTextFile": false, "writeTextFile": false },
+                    "terminal": false,
+                    "auth": { "terminal": true },
+                    "session": { "compaction": {} }
+                },
                 "clientInfo": { "name": "acp-smoke", "version": "0" }
             }),
         )
@@ -150,6 +155,12 @@ async fn main() {
     // SMOKE_REATTACH="<second prompt>": after the first prompt, close the session and
     // resume it in the same process (with SMOKE_MCP if set), then send this prompt.
     let reattach = std::env::var("SMOKE_REATTACH").ok();
+
+    // SMOKE_WAIT=<seconds>: keep listening after session setup (for late updates).
+    if let Some(secs) = std::env::var("SMOKE_WAIT").ok().and_then(|s| s.parse::<u64>().ok()) {
+        tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
+        println!("\n[waited {secs}s]");
+    }
 
     if let Some(prompt) = prompt {
         let res = conn

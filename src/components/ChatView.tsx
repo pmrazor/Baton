@@ -116,6 +116,16 @@ export default function ChatView(p: Props) {
       <TabBar session={session} tab={tab} onTab={p.onTab} />
 
       {p.banner}
+      {session?.archived && (
+        <div className="auth-banner archived-banner">
+          <div>
+            <b>끝난 작업이에요</b>
+            <div className="muted small">
+              작업 폴더가 정리돼서 기록만 볼 수 있어요. 이어서 할 일은 총괄 대화에서 새로 맡겨 주세요.
+            </div>
+          </div>
+        </div>
+      )}
       {session?.attachError && (
         <div className="auth-banner">
           <div>

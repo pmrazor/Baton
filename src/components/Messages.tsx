@@ -6,11 +6,14 @@ import {
   ArrowLeftRight,
   Atom,
   Check,
+  ChevronDown,
   ChevronRight,
+  ChevronUp,
   Copy,
   FilePen,
   FileText,
   Globe,
+  Layers,
   ListChecks,
   Search,
   Terminal,
@@ -126,6 +129,8 @@ export function ChatItemView({ item, isLast }: { item: ChatItem; isLast: boolean
       return <PlanView entries={item.entries} />;
     case "notice":
       return <div className={`notice notice-${item.tone}`}>{item.text}</div>;
+    case "compaction":
+      return <CompactionMarker item={item} />;
     case "brief":
       return (
         <div className="brief">
@@ -137,6 +142,38 @@ export function ChatItemView({ item, isLast }: { item: ChatItem; isLast: boolean
         </div>
       );
   }
+}
+
+/** A divider where the agent condensed earlier history; click to read the summary. */
+function CompactionMarker({ item }: { item: Extract<ChatItem, { kind: "compaction" }> }) {
+  const [open, setOpen] = useState(false);
+  const running = item.status === "in_progress";
+  const label = running
+    ? "대화가 길어져서 앞부분을 요약하는 중…"
+    : item.status === "completed"
+      ? "대화가 길어져서 앞부분을 요약했어요"
+      : item.status === "cancelled"
+        ? "요약을 중단했어요"
+        : `앞부분을 요약하지 못했어요${item.error ? `: ${item.error}` : ""}`;
+  const canOpen = !!item.summary.trim();
+  return (
+    <div className={`compaction ${item.status === "failed" ? "failed" : ""}`}>
+      <button className="compaction-head" onClick={() => canOpen && setOpen(!open)} disabled={!canOpen}>
+        <span className="compaction-line" />
+        <span className="compaction-label">
+          {running ? <span className="spinner" /> : <Layers size={13} />}
+          {label}
+          {canOpen && (open ? <ChevronUp size={13} /> : <ChevronDown size={13} />)}
+        </span>
+        <span className="compaction-line" />
+      </button>
+      {open && (
+        <div className="compaction-summary">
+          <Md text={item.summary} />
+        </div>
+      )}
+    </div>
+  );
 }
 
 export function ThoughtRow({ text }: { text: string }) {

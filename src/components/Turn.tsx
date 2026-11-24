@@ -16,6 +16,8 @@ export interface TurnGroup {
   answer: ChatItem | null;
   /** Notices (errors, "중단됨") stay visible after the answer. */
   notices: ChatItem[];
+  /** Context compactions, shown right under the message that triggered them. */
+  markers: ChatItem[];
 }
 
 /** Split a transcript into turns, each starting at a user message. */
@@ -27,7 +29,8 @@ export function groupTurns(items: ChatItem[]): TurnGroup[] {
   const flush = () => {
     if (!user && rest.length === 0) return;
     const notices = rest.filter((i) => i.kind === "notice");
-    const body = rest.filter((i) => i.kind !== "notice");
+    const markers = rest.filter((i) => i.kind === "compaction");
+    const body = rest.filter((i) => i.kind !== "notice" && i.kind !== "compaction");
     const last = body.at(-1);
     const answer = last?.kind === "assistant" ? last : null;
     turns.push({
@@ -36,6 +39,7 @@ export function groupTurns(items: ChatItem[]): TurnGroup[] {
       process: answer ? body.slice(0, -1) : body,
       answer,
       notices,
+      markers,
     });
   };
 
@@ -79,6 +83,9 @@ export function TurnView(p: TurnProps) {
   return (
     <>
       {turn.user && <ChatItemView item={turn.user} isLast={false} />}
+      {turn.markers.map((m) => (
+        <ChatItemView key={m.id} item={m} isLast={false} />
+      ))}
       {turn.process.length > 0 && (
         <ProcessGroup steps={turn.process} running={running} startedAt={turn.user?.startedAt} durationMs={turn.user?.durationMs} />
       )}

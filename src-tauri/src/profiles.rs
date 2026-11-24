@@ -91,3 +91,42 @@ impl Profiles {
 fn is_safe_id(id: &str) -> bool {
     !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_named_profiles_with_safe_ids_get_a_home() {
+        let p = Profiles::load(Path::new("/nonexistent-config"), Path::new("/data"));
+        assert_eq!(p.home("claude", DEFAULT_PROFILE), None);
+        assert_eq!(p.home("claude", "../escape"), None);
+        assert_eq!(p.home("../claude", "p1"), None);
+        assert_eq!(p.home("claude", ""), None);
+        assert_eq!(p.home("claude", "p1"), Some(PathBuf::from("/data/profiles/claude/p1")));
+    }
+
+    #[test]
+    fn profiles_persist_and_delete_their_home() {
+        let root = std::env::temp_dir().join(format!("baton-profiles-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (config, data) = (root.join("config"), root.join("data"));
+
+        let profiles = Profiles::load(&config, &data);
+        let created = profiles.create("dsh", "  Work  ").unwrap();
+        assert_eq!(created.name, "Work");
+        profiles.rename(&created.id, "Personal").unwrap();
+        assert!(profiles.rename("missing", "x").is_err());
+
+        let reloaded = Profiles::load(&config, &data);
+        assert_eq!(reloaded.list().len(), 1);
+        assert_eq!(reloaded.list()[0].name, "Personal");
+
+        let home = reloaded.home("dsh", &created.id).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        reloaded.delete(&created.id).unwrap();
+        assert!(!home.exists(), "deleting a profile removes its login folder");
+        assert!(Profiles::load(&config, &data).list().is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
