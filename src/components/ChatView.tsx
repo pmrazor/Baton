@@ -8,6 +8,7 @@ import {
   installedAgents,
   profileOf,
   sessionKey,
+  type Attachment,
   type ChatItem,
   type Launch,
   type Session,
@@ -28,7 +29,7 @@ interface Props {
   onTab: (tab: Tab) => void;
   onAddWorkspace: () => void;
   onNewChat: (workspace?: string, agentId?: string, launch?: Launch) => void;
-  onSend: (session: Session, text: string) => void;
+  onSend: (session: Session, text: string, attachments: Attachment[]) => void;
   onCancel: (session: Session) => void;
   onPermission: (key: string, optionId: string | null) => void;
   onSetConfig: (session: Session, configId: string, value: unknown) => void;
@@ -254,7 +255,7 @@ function ConversationView(p: Props & { agentName: (id: string) => string }) {
         onSetLaunch={(id, value) =>
           agentId && p.onNewChat(state.workspace ?? undefined, agentId, { ...session?.launch, [id]: value })
         }
-        onSend={(text) => session && p.onSend(session, text)}
+        onSend={(text, attachments) => session && p.onSend(session, text, attachments)}
         onCancel={() => session && p.onCancel(session)}
         onSetConfig={(id, v) => session && p.onSetConfig(session, id, v)}
         onSetMode={(id) => session && p.onSetMode(session, id)}

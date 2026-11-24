@@ -27,6 +27,23 @@ export interface InstallInfo {
   missing: string[];
 }
 
+/** A file attached to a message (sent to the agent by path). */
+export interface Attachment {
+  path: string;
+  name: string;
+  image: boolean;
+  /** Shown as a thumbnail; sent to the agent as a file link. */
+  video?: boolean;
+}
+
+export const IMAGE_EXT = /\.(png|jpe?g|gif|webp)$/i;
+export const VIDEO_EXT = /\.(mp4|mov|m4v|webm)$/i;
+
+export function attachmentOf(path: string): Attachment {
+  const name = path.split(/[\\/]/).filter(Boolean).at(-1) ?? path;
+  return { path, name, image: IMAGE_EXT.test(name), ...(VIDEO_EXT.test(name) ? { video: true } : {}) };
+}
+
 /** Agents that can be started here, for pickers. */
 export const installedAgents = (agents: AgentInfo[]) => agents.filter((a) => a.installed);
 
@@ -122,7 +139,7 @@ export interface PlanEntry {
 }
 
 export type ChatItem =
-  | { kind: "user"; id: string; text: string; startedAt?: number; durationMs?: number }
+  | { kind: "user"; id: string; text: string; startedAt?: number; durationMs?: number; attachments?: Attachment[] }
   /** An instruction a lead agent gave this task (agent mode). Starts a turn like a user message. */
   | { kind: "brief"; id: string; text: string; label: string; startedAt?: number; durationMs?: number }
   | { kind: "assistant"; id: string; text: string }
@@ -278,6 +295,12 @@ export interface Team {
   maxParallel: number;
   /** How file-writing tasks share a git workspace. */
   isolation: "worktree" | "shared";
+  /** Shipped with the app (auto + one per service): copy it to change it. */
+  builtin?: boolean;
 }
 
 export const AUTO_TEAM = "auto";
+
+/** Teams worth offering: the user's own, and built-in ones with a member that can run here. */
+export const usableTeams = (teams: Team[], agents: AgentInfo[]) =>
+  teams.filter((t) => !t.builtin || t.members.some((m) => agents.some((a) => a.id === m.agentId && a.installed)));

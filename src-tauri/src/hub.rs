@@ -84,6 +84,9 @@ pub struct Hub {
     captures: std::sync::Mutex<HashMap<(String, String), Vec<Value>>>,
     permissions: std::sync::Mutex<HashMap<String, PendingPermission>>,
     next_permission: AtomicU64,
+    /// What lead sessions reported about their tool calls, by (agent,
+    /// session, tool call id), for recognising Baton tools when they ask.
+    lead_tool_calls: std::sync::Mutex<HashMap<(String, String, String), String>>,
     /// When each (agent, profile)'s plan limits were last read.
     usage_checked: std::sync::Mutex<HashMap<(String, String), std::time::Instant>>,
 }
@@ -166,6 +169,7 @@ impl Hub {
             permissions: Default::default(),
             next_permission: AtomicU64::new(1),
             usage_checked: Default::default(),
+            lead_tool_calls: Default::default(),
         }
     }
 
@@ -559,12 +563,12 @@ impl Hub {
         }
     }
 
-    pub async fn prompt(&self, agent_id: &str, session_id: &str, text: &str) -> Result<Value, HubError> {
+    /// Send a message, with `attachments` (file paths) after the text.
+    pub async fn prompt(&self, agent_id: &str, session_id: &str, text: &str, attachments: &[String]) -> Result<Value, HubError> {
         let rt = self.session_runtime(agent_id, session_id).await?;
-        let params = json!({
-            "sessionId": session_id,
-            "prompt": [{ "type": "text", "text": text }]
-        });
+        let caps = rt.init.pointer("/agentCapabilities/promptCapabilities").cloned().unwrap_or(Value::Null);
+        let blocks = crate::attachments::prompt_blocks(text, attachments, &caps).map_err(HubError::plain)?;
+        let params = json!({ "sessionId": session_id, "prompt": blocks });
         let result = rt.conn.request("session/prompt", params).await.map_err(|e| HubError::with_auth(e, &rt));
         let launch = self.homes.lock().unwrap().get(&(agent_id.to_string(), session_id.to_string())).map(|h| h.launch.clone());
         if let Some(launch) = launch {
@@ -577,7 +581,9 @@ impl Hub {
     /// `usageArgs` only); stored for the orchestrator and sent to the UI.
     pub fn refresh_usage(&self, agent_id: &str, launch: &Launch) {
         let Ok(def) = self.def(agent_id) else { return };
-        if def.usage_args.is_empty() {
+        let codex = !def.usage_app_server.is_empty();
+        let args = if codex { &def.usage_app_server } else { &def.usage_args };
+        if args.is_empty() {
             return;
         }
         let profile_id = self.profile_of(def, launch);
@@ -589,32 +595,33 @@ impl Hub {
             }
             checked.insert(account, std::time::Instant::now());
         }
-        let mut cmd = std::process::Command::new(&def.command);
-        cmd.args(&def.usage_args).envs(&def.env).stdin(std::process::Stdio::null());
+        let mut cmd = crate::usage::command(&def.command, args);
+        cmd.envs(&def.env);
         if let Some(path) = crate::shell_env::refreshed_path() {
             cmd.env("PATH", path);
         }
         if let Some((var, home)) = self.profile_env(def, &profile_id) {
             cmd.env(var, home);
         }
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            cmd.creation_flags(acp::CREATE_NO_WINDOW);
-        }
         let app = self.app.clone();
         let agent_id = agent_id.to_string();
         tokio::spawn(async move {
-            let out = tokio::task::spawn_blocking(move || cmd.output()).await;
-            let Ok(Ok(out)) = out else { return };
-            let Some(usage) = parse_usage_report(&out.stdout) else {
-                use tauri::Manager;
-                let text = String::from_utf8_lossy(&out.stderr);
-                app.state::<Hub>().emit_log(&agent_id, &format!("[hub] 사용량을 읽지 못했어요: {}", text.trim()));
-                return;
-            };
             use tauri::Manager;
-            app.state::<Hub>().store_quota(&agent_id, &profile_id, usage.clone());
+            let read = tokio::task::spawn_blocking(move || {
+                if codex { crate::usage::read_codex_app_server(cmd) } else { crate::usage::read_print(cmd) }
+            })
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()));
+            let hub = app.state::<Hub>();
+            let usage = match read {
+                Ok(usage) => usage,
+                Err(e) => return hub.emit_log(&agent_id, &format!("[hub] 사용량을 읽지 못했어요: {e}")),
+            };
+            let count: usize = usage["groups"].as_array().map_or(0, |g| {
+                g.iter().map(|g| g["buckets"].as_array().map_or(0, Vec::len)).sum()
+            });
+            hub.emit_log(&agent_id, &format!("[hub] 사용량 갱신: 한도 {count}개"));
+            hub.store_quota(&agent_id, &profile_id, usage.clone());
             let _ = app.emit("account-usage", json!({ "agentId": agent_id, "profileId": profile_id, "usage": usage }));
         });
     }
@@ -674,6 +681,52 @@ impl Hub {
 
     pub fn agent_options(&self) -> HashMap<String, Value> {
         self.options.lock().unwrap().clone()
+    }
+
+    /// Remember a lead's tool call (its title, name and input) by id.
+    fn note_lead_tool_call(&self, agent_id: &str, session_id: &str, update: &Value) {
+        use tauri::Manager;
+        if !matches!(update.get("sessionUpdate").and_then(Value::as_str), Some("tool_call" | "tool_call_update")) {
+            return;
+        }
+        let Some(call_id) = update.get("toolCallId").and_then(Value::as_str) else { return };
+        if !self.app.state::<crate::orchestra::Orchestra>().is_lead(agent_id, session_id) {
+            return;
+        }
+        let mut calls = self.lead_tool_calls.lock().unwrap();
+        if calls.len() > 500 {
+            calls.clear(); // old calls are long answered
+        }
+        let text: String = ["title", "name", "rawInput"]
+            .iter()
+            .filter_map(|k| update.get(*k).filter(|v| !v.is_null()).map(Value::to_string))
+            .collect::<Vec<_>>()
+            .join(" ");
+        if !text.is_empty() {
+            let key = (agent_id.to_string(), session_id.to_string(), call_id.to_string());
+            let entry = calls.entry(key).or_default();
+            // The first reports name the tool; later ones only stream progress.
+            if entry.len() < 4000 {
+                entry.push(' ');
+                entry.push_str(&text);
+            }
+        }
+    }
+
+    /// The option to pick by ourselves for a lead asking to run a Baton tool.
+    fn auto_approval(&self, agent_id: &str, session_id: &str, params: &Value) -> Option<String> {
+        use tauri::Manager;
+        if !self.app.state::<crate::orchestra::Orchestra>().is_lead(agent_id, session_id) {
+            return None;
+        }
+        let call_id = params.pointer("/toolCall/toolCallId").and_then(Value::as_str).unwrap_or_default();
+        let earlier = self
+            .lead_tool_calls
+            .lock()
+            .unwrap()
+            .get(&(agent_id.to_string(), session_id.to_string(), call_id.to_string()))
+            .cloned();
+        crate::orchestra::baton_tool_approval(params, earlier.as_deref())
     }
 
     pub fn store_quota(&self, agent_id: &str, profile_id: &str, info: Value) {
@@ -766,15 +819,6 @@ impl Hub {
     }
 }
 
-/// Antigravity's `agy -p /usage --output-format json`: the limit groups sit in
-/// `command.data` (`{ groups: [{ name, buckets: [{ id, window, remaining_fraction, reset_time }] }] }`).
-fn parse_usage_report(stdout: &[u8]) -> Option<Value> {
-    let report: Value = serde_json::from_slice(stdout).ok()?;
-    let data = report.pointer("/command/data")?;
-    data.get("groups")?.as_array()?;
-    Some(data.clone())
-}
-
 async fn pump_incoming(
     app: AppHandle,
     agent_id: String,
@@ -796,6 +840,7 @@ async fn pump_incoming(
                     if app.state::<Hub>().capture(&agent_id, session_id, &update) {
                         continue;
                     }
+                    app.state::<Hub>().note_lead_tool_call(&agent_id, session_id, &update);
                     app.state::<crate::orchestra::Orchestra>().observe(&agent_id, session_id, &update);
                 }
                 let _ = app.emit(
@@ -819,6 +864,12 @@ async fn pump_incoming(
             Incoming::Request { id, method, params } if method == "session/request_permission" => {
                 let hub = app.state::<Hub>();
                 let session_id = params.get("sessionId").and_then(Value::as_str).unwrap_or_default();
+                // A lead's own Baton tools run without asking (Claude is told so
+                // up front; other agents ask, and are answered here).
+                if let Some(option_id) = hub.auto_approval(&agent_id, session_id, &params) {
+                    let _ = conn.respond(id, Ok(json!({ "outcome": { "outcome": "selected", "optionId": option_id } }))).await;
+                    continue;
+                }
                 let (key, reply) = hub.register_permission(&agent_id, session_id, &runtime_key);
                 let _ = app.emit(
                     "acp-permission",
@@ -849,22 +900,5 @@ async fn pump_incoming(
                 break;
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn reads_antigravity_usage_reports() {
-        let report = br#"{"status":"SUCCESS","response":"Gemini Models\tWeekly...","command":{"name":"usage","data":{
-            "groups":[{"name":"Gemini Models","buckets":[{"id":"gemini-5h","window":"5h","remaining_fraction":0.75,"reset_time":"2026-11-24T12:04:30Z"}]}]}}}"#;
-        let usage = parse_usage_report(report).unwrap();
-        assert_eq!(usage["groups"][0]["buckets"][0]["id"], "gemini-5h");
-
-        assert!(parse_usage_report(b"Not logged in").is_none());
-        assert!(parse_usage_report(br#"{"status":"SUCCESS","response":"hi"}"#).is_none());
-        assert!(parse_usage_report(br#"{"command":{"name":"usage","data":{}}}"#).is_none());
     }
 }

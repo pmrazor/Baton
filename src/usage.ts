@@ -54,16 +54,21 @@ function fromClaude(update: any): QuotaEntry[] {
 const GROUP_LABEL: Record<string, string> = {
   "Gemini Models": "Gemini",
   "Claude and GPT models": "Claude·GPT",
+  codex: "Codex",
 };
 
-const WINDOW_LABEL: Record<string, string> = {
-  "5h": "5시간 한도",
-  weekly: "주간 한도",
-};
+/** "5h" → "5시간 한도", "weekly" → "주간 한도", "3d" → "3일 한도". */
+function windowLabel(window: unknown, fallback: unknown): string {
+  if (window === "weekly") return "주간 한도";
+  const m = /^(\d+)([mhd])$/.exec(String(window));
+  if (m) return `${m[1]}${{ m: "분", h: "시간", d: "일" }[m[2] as "m" | "h" | "d"]} 한도`;
+  return typeof fallback === "string" ? fallback : "한도";
+}
 
 /**
- * Antigravity: `agy -p /usage --output-format json` → `command.data`, limit
- * groups (models sharing a meter) with the fraction left in each window.
+ * Plan limits Baton read itself (`account-usage`), as limit groups (models
+ * sharing a meter) with the fraction left in each window. Antigravity's
+ * `agy -p /usage` and Codex's `account/rateLimits/read` both arrive this way.
  */
 export function quotasFromUsageReport(usage: unknown): QuotaEntry[] {
   const groups = (usage as any)?.groups;
@@ -71,11 +76,17 @@ export function quotasFromUsageReport(usage: unknown): QuotaEntry[] {
   return groups.flatMap((g: any) =>
     (Array.isArray(g?.buckets) ? g.buckets : []).map((b: any): QuotaEntry => {
       const left = typeof b.remaining_fraction === "number" ? Math.min(1, Math.max(0, b.remaining_fraction)) : undefined;
-      const resets = typeof b.reset_time === "string" ? Date.parse(b.reset_time) : NaN;
+      // Codex gives Unix seconds, Antigravity an ISO timestamp.
+      const resets =
+        typeof b.resets_at === "number"
+          ? b.resets_at * 1000
+          : typeof b.reset_time === "string"
+            ? Date.parse(b.reset_time)
+            : NaN;
       const group = GROUP_LABEL[g.name] ?? String(g.name ?? "모델");
       return {
         id: `antigravity:${b.id ?? `${g.name}-${b.window}`}`,
-        label: `${group} ${WINDOW_LABEL[b.window] ?? b.name ?? "한도"}`,
+        label: `${group} ${windowLabel(b.window, b.name)}`,
         status: left === undefined ? "ok" : left <= 0 ? "limited" : left < 0.1 ? "warning" : "ok",
         utilization: left === undefined ? undefined : (1 - left) * 100,
         resetsAt: Number.isNaN(resets) ? undefined : resets,

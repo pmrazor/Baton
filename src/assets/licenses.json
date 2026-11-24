@@ -278,6 +278,13 @@
   },
   {
    "name": "base64",
+   "version": "0.22.1",
+   "license": "MIT OR Apache-2.0",
+   "url": "https://github.com/marshallpierce/rust-base64",
+   "source": "cargo"
+  },
+  {
+   "name": "base64",
    "version": "0.23.1",
    "license": "MIT OR Apache-2.0",
    "url": "https://github.com/marshallpierce/rust-base64",
@@ -1331,6 +1338,13 @@
    "version": "0.1.5",
    "license": "MIT",
    "url": "https://github.com/hyperium/http-body",
+   "source": "cargo"
+  },
+  {
+   "name": "http-range",
+   "version": "0.1.6",
+   "license": "MIT",
+   "url": "https://github.com/bancek/rust-http-range.git",
    "source": "cargo"
   },
   {

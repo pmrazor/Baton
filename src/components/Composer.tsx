@@ -1,7 +1,23 @@
-import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { ArrowUp, Bot, ChevronDown, ShieldCheck, SlidersHorizontal, Square, Users } from "lucide-react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import {
+  ArrowUp,
+  Bot,
+  ChevronDown,
+  Plus,
+  ShieldCheck,
+  SlidersHorizontal,
+  Square,
+  Users,
+} from "lucide-react";
+import AttachmentView from "./AttachmentView";
+import { api, toHubError } from "../api";
+import {
+  attachmentOf,
   DEFAULT_PROFILE,
+  usableTeams,
+  type Attachment,
   type AccountUsage,
   type AgentInfo,
   type AuthStatus,
@@ -32,7 +48,7 @@ interface Props {
   onAddAgent: () => void;
   /** Restart the draft with a different launch option (only before the first message). */
   onSetLaunch: (optionId: string, value: string) => void;
-  onSend: (text: string) => void;
+  onSend: (text: string, attachments: Attachment[]) => void;
   onCancel: () => void;
   onSetConfig: (configId: string, value: unknown) => void;
   onSetMode: (modeId: string) => void;
@@ -71,8 +87,25 @@ function classify(options: ConfigOption[]) {
   return { mode, model, effort, rest };
 }
 
+/** Read a pasted file as base64 (without the data: prefix). */
+function readBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).replace(/^data:[^,]*,/, ""));
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
 export default function Composer(p: Props) {
   const [draft, setDraft] = useState("");
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [attachError, setAttachError] = useState<string | null>(null);
+  const [dragging, setDragging] = useState(false);
+  const addPaths = (paths: string[]) => {
+    setAttachError(null);
+    setAttachments((list) => [...list, ...paths.filter((path) => !list.some((a) => a.path === path)).map(attachmentOf)]);
+  };
   // Slash-command menu: open while the draft is "/word" with no space yet.
   const [cmdIndex, setCmdIndex] = useState(0);
   const [cmdDismissed, setCmdDismissed] = useState(false);
@@ -102,11 +135,50 @@ export default function Composer(p: Props) {
     el.style.height = `${el.scrollHeight}px`;
   }, [draft]);
 
+  // Files dropped anywhere on the window are attached to this message.
+  const canAttach = ready && !busy;
+  const canAttachRef = useRef(canAttach);
+  canAttachRef.current = canAttach;
+  useEffect(() => {
+    const off = getCurrentWebview().onDragDropEvent((event) => {
+      const { type } = event.payload;
+      if (type === "over" || type === "enter") setDragging(canAttachRef.current);
+      else setDragging(false);
+      if (type === "drop" && canAttachRef.current && event.payload.paths.length) addPaths(event.payload.paths);
+    });
+    return () => {
+      off.then((unlisten) => unlisten());
+    };
+  }, []);
+
+  const pickFiles = async () => {
+    const picked = await openDialog({ multiple: true, directory: false, title: "첨부할 파일" });
+    if (picked) addPaths(Array.isArray(picked) ? picked : [picked]);
+    textRef.current?.focus();
+  };
+
+  // A pasted screenshot has no file yet: keep it in the workspace's .baton first.
+  const pasteImages = async (files: File[]) => {
+    const workspace = p.session?.cwd;
+    if (!workspace) return;
+    try {
+      for (const file of files) {
+        const ext = file.type.split("/")[1] ?? "png";
+        const name = file.name && file.name !== "image.png" ? file.name : `pasted.${ext}`;
+        addPaths([await api.saveAttachment(workspace, name, await readBase64(file))]);
+      }
+    } catch (e) {
+      setAttachError(`붙여넣은 이미지를 저장하지 못했어요: ${toHubError(e).message}`);
+    }
+  };
+
   const submit = () => {
     const text = draft.trim();
-    if (!text || busy || !ready) return;
+    if ((!text && attachments.length === 0) || busy || !ready) return;
     setDraft("");
-    p.onSend(text);
+    setAttachments([]);
+    setAttachError(null);
+    p.onSend(text, attachments);
   };
 
   return (
@@ -132,7 +204,22 @@ export default function Composer(p: Props) {
           ))}
         </div>
       )}
-      <div className="composer">
+      <div className={`composer ${dragging ? "dragging" : ""}`}>
+        {(attachments.length > 0 || attachError) && (
+          <div className="attach-list">
+            {attachments.map((a) => (
+              <AttachmentView
+                key={a.path}
+                a={a}
+                onRemove={() => setAttachments((list) => list.filter((x) => x.path !== a.path))}
+              />
+            ))}
+            {attachError && <span className="error-text small">{attachError}</span>}
+          </div>
+        )}
+        <button className="attach-btn" title="파일·이미지 첨부" aria-label="첨부" disabled={!canAttach} onClick={pickFiles}>
+          <Plus size={18} />
+        </button>
         {matches.length > 0 && (
           <div className="command-menu" role="listbox" aria-label="명령">
             {matches.map((c, i) => (
@@ -171,6 +258,13 @@ export default function Composer(p: Props) {
                   ? "총괄에게 지시하기"
                   : "에이전트에게 메시지 보내기"
           }
+          onPaste={(e) => {
+            const images = [...e.clipboardData.files].filter((f) => f.type.startsWith("image/"));
+            // Copied text that comes with pictures (e.g. from a web page) pastes as text.
+            if (images.length === 0 || e.clipboardData.getData("text/plain")) return;
+            e.preventDefault();
+            if (canAttach) pasteImages(images);
+          }}
           onChange={(e) => {
             setDraft(e.target.value);
             setCmdDismissed(false);
@@ -207,7 +301,12 @@ export default function Composer(p: Props) {
             <Square size={12} fill="currentColor" />
           </button>
         ) : (
-          <button className="send" title="전송 (Enter)" disabled={!draft.trim() || !ready} onClick={submit}>
+          <button
+            className="send"
+            title="전송 (Enter)"
+            disabled={(!draft.trim() && attachments.length === 0) || !ready}
+            onClick={submit}
+          >
             {p.connecting ? <span className="spinner light" /> : <ArrowUp size={17} />}
           </button>
         )}
@@ -292,7 +391,7 @@ export default function Composer(p: Props) {
           >
             {(close) => (
               <MenuSection title="팀">
-                {p.teams.map((t) => (
+                {usableTeams(p.teams, p.agents).map((t) => (
                   <MenuItem
                     key={t.id}
                     label={t.name}

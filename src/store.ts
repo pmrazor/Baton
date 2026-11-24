@@ -1,6 +1,7 @@
 import type {
   AccountUsage,
   AgentInfo,
+  Attachment,
   AuthStatus,
   AgentStatus,
   AuthMethod,
@@ -17,7 +18,7 @@ import type {
   ToolCallFields,
   TurnStats,
 } from "./types";
-import { accountKey, isTaskActive, sessionKey } from "./types";
+import { accountKey, attachmentOf, isTaskActive, sessionKey } from "./types";
 import type { TaskSessionEvent } from "./api";
 import { quotasFromUpdate } from "./usage";
 
@@ -99,7 +100,7 @@ export type Action =
   | { type: "rekey"; key: string; sessionId: string; configOptions: ConfigOption[]; modes: SessionModes | null }
   | { type: "dropDrafts" }
   | { type: "closeSession"; key: string }
-  | { type: "userMessage"; key: string; text: string }
+  | { type: "userMessage"; key: string; text: string; attachments?: Attachment[] }
   | { type: "busy"; key: string; busy: boolean }
   | { type: "notice"; key: string; text: string; tone: "info" | "error" }
   | { type: "update"; agentId: string; profileId: string; sessionId: string; update: any }
@@ -263,10 +264,19 @@ export function reducer(state: State, action: Action): State {
     case "userMessage":
       return mapSession(state, action.key, (s) => ({
         ...s,
-        title: s.items.length === 0 ? action.text.slice(0, 40) : s.title,
+        title: s.items.length === 0 ? (action.text || action.attachments?.[0]?.name || s.title).slice(0, 40) : s.title,
         draft: false,
         updatedAt: Date.now(),
-        items: [...s.items, { kind: "user", id: nextId(), text: action.text, startedAt: Date.now() }],
+        items: [
+          ...s.items,
+          {
+            kind: "user",
+            id: nextId(),
+            text: action.text,
+            startedAt: Date.now(),
+            ...(action.attachments?.length ? { attachments: action.attachments } : {}),
+          },
+        ],
       }));
     case "busy":
       return mapSession(state, action.key, (s) => ({
@@ -471,6 +481,17 @@ function applyTask(state: State, task: TaskInfo): State {
   return next;
 }
 
+/** Local path of a `file://` URI (Windows: file:///C:/… → C:/…). */
+export function pathFromFileUri(uri: string): string | null {
+  if (!uri.startsWith("file://")) return null;
+  try {
+    const path = decodeURIComponent(uri.slice("file://".length));
+    return /^\/[A-Za-z]:\//.test(path) ? path.slice(1) : path;
+  } catch {
+    return null;
+  }
+}
+
 const blocksText = (blocks: any[] | null | undefined) =>
   (blocks ?? []).map((b) => (b?.type === "text" ? (b.text ?? "") : "")).join("");
 
@@ -571,12 +592,22 @@ function applyUpdate(s: Session, u: any, replay = false): Session {
       // Live turns already show the user's message; only a replay needs it.
       if (!replay) return s;
       const c = u.content ?? {};
-      const text = c.type === "text" ? (c.text ?? "") : `[${c.type ?? "content"}]`;
+      // Attached files come back as their own blocks: show them as attachments.
+      const uri = c.type === "resource" ? c.resource?.uri : c.uri;
+      const file = typeof uri === "string" ? pathFromFileUri(uri) : null;
+      const attachment = file && ["image", "resource", "resource_link"].includes(c.type) ? attachmentOf(file) : null;
+      const text = attachment ? "" : c.type === "text" ? (c.text ?? "") : `[${c.type ?? "content"}]`;
       const last = s.items.at(-1);
-      if (last && last.kind === "user") {
-        return { ...s, items: [...s.items.slice(0, -1), { ...last, text: last.text + text }] };
-      }
-      return { ...s, items: [...s.items, { kind: "user", id: nextId(), text }] };
+      const base = last && last.kind === "user" ? last : null;
+      const merged: ChatItem = {
+        kind: "user",
+        id: base?.id ?? nextId(),
+        text: (base?.text ?? "") + text,
+        ...(base?.attachments || attachment
+          ? { attachments: [...(base?.attachments ?? []), ...(attachment ? [attachment] : [])] }
+          : {}),
+      };
+      return { ...s, items: base ? [...s.items.slice(0, -1), merged] : [...s.items, merged] };
     }
     case "agent_message_chunk":
     case "agent_thought_chunk": {

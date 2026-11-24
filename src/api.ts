@@ -76,11 +76,18 @@ export const api = {
   /** Remove the agent's own copy (true if the agent supports deleting). */
   deleteAgentSession: (agentId: string, sessionId: string, cwd: string, launch: Launch) =>
     invoke<boolean>("delete_agent_session", { agentId, sessionId, cwd, launch }),
-  sendPrompt: (agentId: string, sessionId: string, text: string) =>
+  /** `attachments`: file paths sent after the text. */
+  sendPrompt: (agentId: string, sessionId: string, text: string, attachments: string[] = []) =>
     invoke<{
       stopReason: string;
       usage?: { inputTokens?: number; outputTokens?: number; cachedReadTokens?: number };
-    }>("send_prompt", { agentId, sessionId, text }),
+    }>("send_prompt", { agentId, sessionId, text, attachments }),
+  /** Let the webview load these media files for thumbnails; returns the allowed ones. */
+  allowPreviews: (paths: string[]) => invoke<string[]>("allow_previews", { paths }),
+  openAttachment: (path: string) => invoke<void>("open_attachment", { path }),
+  /** Store a pasted image (base64) in the workspace's .baton/attachments; returns its path. */
+  saveAttachment: (workspace: string, name: string, data: string) =>
+    invoke<string>("save_attachment", { workspace, name, data }),
   cancelPrompt: (agentId: string, sessionId: string) => invoke<void>("cancel_prompt", { agentId, sessionId }),
   respondPermission: (key: string, optionId: string | null) => invoke<void>("respond_permission", { key, optionId }),
   setConfigOption: (agentId: string, sessionId: string, configId: string, value: unknown) =>

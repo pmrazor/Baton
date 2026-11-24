@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { initialState, reducer, type Action, type State } from "./store";
-import type { ChatItem, Session, TaskInfo } from "./types";
+import { attachmentOf, usableTeams, type AgentInfo, type ChatItem, type Session, type TaskInfo, type Team } from "./types";
 
 const run = (state: State, ...actions: Action[]) => actions.reduce(reducer, state);
 
@@ -147,6 +147,41 @@ describe("streaming a turn", () => {
   });
 });
 
+describe("usableTeams", () => {
+  it("hides built-in teams whose services aren't installed", () => {
+    const agent = (id: string, installed: boolean) => ({ id, installed }) as AgentInfo;
+    const team = (id: string, agentId: string, builtin: boolean): Team => ({
+      id,
+      name: id,
+      members: [{ id: "m", name: "m", agentId, profileId: "default", launch: {}, config: {}, role: "" }],
+      maxParallel: 3,
+      isolation: "worktree",
+      builtin,
+    });
+    const teams = [team("preset-claude", "claude", true), team("preset-codex", "codex", true), team("mine", "codex", false)];
+    const ids = usableTeams(teams, [agent("claude", true), agent("codex", false)]).map((t) => t.id);
+    expect(ids).toEqual(["preset-claude", "mine"]);
+  });
+});
+
+describe("attachmentOf", () => {
+  it("tells images and videos from other files", () => {
+    expect(attachmentOf("/a/Shot 1.PNG")).toEqual({ path: "/a/Shot 1.PNG", name: "Shot 1.PNG", image: true });
+    expect(attachmentOf("C:\\clips\\demo.mov")).toEqual({ path: "C:\\clips\\demo.mov", name: "demo.mov", image: false, video: true });
+    expect(attachmentOf("/a/notes.md")).toEqual({ path: "/a/notes.md", name: "notes.md", image: false });
+  });
+});
+
+describe("sending attachments", () => {
+  it("keeps them on the message and names an empty chat after the first file", () => {
+    const shot = { path: "/w/.baton/attachments/1-pasted.png", name: "1-pasted.png", image: true };
+    const state = run(initialState, created("s1"), { type: "userMessage", key: "claude:s1", text: "", attachments: [shot] });
+    const s = session(state, "s1");
+    expect(s.items[0]).toMatchObject({ kind: "user", text: "", attachments: [shot] });
+    expect(s.title).toBe("1-pasted.png");
+  });
+});
+
 describe("account usage", () => {
   it("a usage report replaces the account's entries", () => {
     const entry = (id: string) => ({ id, label: id, status: "ok" as const });
@@ -228,6 +263,26 @@ describe("importing a conversation", () => {
     );
     const texts = session(state, "old").items.map((i) => ("text" in i ? i.text : ""));
     expect(texts).toEqual(["fix it", "ok", "write tests"]);
+  });
+
+  it("shows replayed attachments as attachments", () => {
+    const state = run(
+      initialState,
+      imported([
+        userChunk("look at this"),
+        { sessionUpdate: "user_message_chunk", content: { type: "image", mimeType: "image/png", data: "x", uri: "file:///Users/me/My%20Shot.png" } },
+        { sessionUpdate: "user_message_chunk", content: { type: "resource_link", uri: "file:///C:/work/notes.md", name: "notes.md" } },
+      ]),
+    );
+    const [user] = session(state, "old").items;
+    expect(user).toMatchObject({
+      kind: "user",
+      text: "look at this",
+      attachments: [
+        { path: "/Users/me/My Shot.png", name: "My Shot.png", image: true },
+        { path: "C:/work/notes.md", name: "notes.md", image: false },
+      ],
+    });
   });
 
   it("explains an empty transcript and ignores a second import", () => {

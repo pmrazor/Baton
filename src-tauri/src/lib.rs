@@ -1,5 +1,6 @@
 pub mod acp;
 pub mod agents;
+mod attachments;
 mod history;
 mod hub;
 mod legacy;
@@ -8,6 +9,7 @@ mod orchestra;
 mod profiles;
 mod shell_env;
 mod teams;
+pub mod usage;
 mod worktree;
 
 use std::collections::HashMap;
@@ -83,9 +85,10 @@ async fn send_prompt(
     agent_id: String,
     session_id: String,
     text: String,
+    attachments: Option<Vec<String>>,
 ) -> Result<Value, HubError> {
     let text = orchestra.lead_prompt(&agent_id, &session_id, &text);
-    hub.prompt(&agent_id, &session_id, &text).await
+    hub.prompt(&agent_id, &session_id, &text, &attachments.unwrap_or_default()).await
 }
 
 #[tauri::command]
@@ -457,6 +460,9 @@ pub fn run() {
             stop_agent,
             open_login_terminal,
             refresh_agents,
+            attachments::save_attachment,
+            attachments::allow_previews,
+            attachments::open_attachment,
             install_agent,
             login_profile,
             list_profiles,

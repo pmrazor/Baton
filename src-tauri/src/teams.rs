@@ -48,6 +48,9 @@ pub struct Team {
     /// own copy, merged back on request) or "shared" (one at a time in place).
     #[serde(default = "default_isolation")]
     pub isolation: String,
+    /// Shipped with the app: can be copied, not edited. Never stored.
+    #[serde(default, skip_deserializing)]
+    pub builtin: bool,
 }
 
 fn default_isolation() -> String {
@@ -58,10 +61,8 @@ fn default_parallel() -> usize {
     3
 }
 
-/// The roster used when the user hasn't built one. The lead runs on Opus, so
-/// members use the other tiers.
-pub fn auto_team() -> Team {
-    let member = |id: &str, name: &str, agent: &str, config: Value, role: &str| Member {
+fn member(id: &str, name: &str, agent: &str, config: Value, role: &str) -> Member {
+    Member {
         id: id.into(),
         name: name.into(),
         agent_id: agent.into(),
@@ -69,12 +70,93 @@ pub fn auto_team() -> Team {
         launch: HashMap::new(),
         config: serde_json::from_value(config).unwrap_or_default(),
         role: role.into(),
-    };
+    }
+}
+
+fn builtin(id: &str, name: &str, members: Vec<Member>) -> Team {
+    Team { id: id.into(), name: name.into(), members, max_parallel: 3, isolation: default_isolation(), builtin: true }
+}
+
+/// Teams shipped with the app: the mixed auto team, then one per service
+/// (so a lead can keep work inside one subscription).
+pub fn builtin_teams() -> Vec<Team> {
+    vec![auto_team(), claude_team(), codex_team(), antigravity_team(), deepseek_team()]
+}
+
+const FABLE_ROLE: &str = "Complex implementation, design changes, multi-file refactors.";
+const SONNET_ROLE: &str = "General implementation, code review, documentation.";
+const HAIKU_ROLE: &str = "Small edits, code search and exploration, quick checks.";
+const DEEP_ROLE: &str = "Complex implementation, refactors and debugging: thinks longer.";
+const QUICK_ROLE: &str = "Small edits, code search, running commands, quick checks: answers fast.";
+
+fn claude_team() -> Team {
+    builtin(
+        "preset-claude",
+        "Claude",
+        vec![
+            member("claude-fable", "Claude Code · Fable", "claude", json!({ "model": "fable" }), FABLE_ROLE),
+            member("claude-sonnet", "Claude Code · Sonnet", "claude", json!({ "model": "sonnet" }), SONNET_ROLE),
+            member("claude-haiku", "Claude Code · Haiku", "claude", json!({ "model": "haiku" }), HAIKU_ROLE),
+        ],
+    )
+}
+
+fn codex_team() -> Team {
+    builtin(
+        "preset-codex",
+        "Codex",
+        vec![
+            member("codex-deep", "Codex · 깊게", "codex", json!({ "reasoning_effort": "high" }), DEEP_ROLE),
+            member("codex-quick", "Codex · 빠르게", "codex", json!({ "reasoning_effort": "low" }), QUICK_ROLE),
+        ],
+    )
+}
+
+/// Antigravity's models depend on the Google plan and change often, so its
+/// members run on the account's default model and differ in thinking level.
+fn antigravity_team() -> Team {
+    builtin(
+        "preset-antigravity",
+        "Antigravity",
+        vec![
+            member("antigravity-deep", "Antigravity · 깊게", "antigravity", json!({ "thought_level": "high" }), DEEP_ROLE),
+            member("antigravity-quick", "Antigravity · 빠르게", "antigravity", json!({ "thought_level": "low" }), QUICK_ROLE),
+        ],
+    )
+}
+
+fn deepseek_team() -> Team {
+    builtin(
+        "preset-deepseek",
+        "DeepSeek",
+        vec![
+            member(
+                "deepseek-pro",
+                "DeepSeek · V4 Pro",
+                "dsh",
+                json!({ "model": r#"["deepseek-account","deepseek-v4-pro"]"# }),
+                "Hard reasoning: tricky bugs, algorithms, careful implementation.",
+            ),
+            member(
+                "deepseek-flash",
+                "DeepSeek · V4.1 Flash",
+                "dsh",
+                json!({ "model": r#"["deepseek-account","deepseek-flash"]"# }),
+                "Fast, cheap work: writing tests, repetitive or bulk edits, running commands.",
+            ),
+        ],
+    )
+}
+
+/// The roster used when the user hasn't built one, mixing services. The lead
+/// runs on Opus, so Claude members use the other tiers.
+pub fn auto_team() -> Team {
     Team {
         id: AUTO_TEAM.into(),
         name: "자동".into(),
         max_parallel: 3,
         isolation: default_isolation(),
+        builtin: true,
         members: vec![
             member(
                 "claude-fable",
@@ -139,9 +221,9 @@ impl Teams {
         Self { file, list: Mutex::new(list) }
     }
 
-    /// Built-in auto team first, then the user's teams.
+    /// Built-in teams first, then the user's teams.
     pub fn all(&self) -> Vec<Team> {
-        std::iter::once(auto_team()).chain(self.list.lock().unwrap().iter().cloned()).collect()
+        builtin_teams().into_iter().chain(self.list.lock().unwrap().iter().cloned()).collect()
     }
 
     pub fn get(&self, id: &str) -> Team {
@@ -150,9 +232,10 @@ impl Teams {
 
     /// Insert or replace a user team (the auto team cannot be overwritten).
     pub fn save_team(&self, team: Team) -> Result<Team, String> {
-        if team.id == AUTO_TEAM {
-            return Err("자동 팀은 바꿀 수 없어요. 복제해서 새 팀으로 만들어 주세요.".into());
+        if builtin_teams().iter().any(|t| t.id == team.id) {
+            return Err("기본 제공 팀은 바꿀 수 없어요. 복제해서 새 팀으로 만들어 주세요.".into());
         }
+        let team = Team { builtin: false, ..team };
         let mut list = self.list.lock().unwrap();
         match list.iter_mut().find(|t| t.id == team.id) {
             Some(existing) => *existing = team.clone(),
@@ -182,6 +265,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn builtin_teams_are_valid() {
+        let teams = builtin_teams();
+        let ids: Vec<&str> = teams.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, ["auto", "preset-claude", "preset-codex", "preset-antigravity", "preset-deepseek"]);
+        let agents = crate::agents::default_agents();
+        for team in &teams {
+            assert!(team.builtin && !team.members.is_empty(), "{}", team.id);
+            for m in &team.members {
+                let agent = agents.iter().find(|a| a.id == m.agent_id).unwrap_or_else(|| panic!("{}: {}", team.id, m.agent_id));
+                assert!(!m.role.is_empty(), "{}", m.id);
+                // Single-service presets stay inside their service.
+                if team.id.starts_with("preset-") {
+                    assert!(team.id.ends_with(&agent.id) || (team.id == "preset-deepseek" && agent.id == "dsh"), "{}", m.id);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn auto_team_is_valid() {
         let team = auto_team();
         let mut ids: Vec<&str> = team.members.iter().map(|m| m.id.as_str()).collect();
@@ -201,6 +303,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let teams = Teams::load(&dir);
         assert!(teams.save_team(auto_team()).is_err());
+        let mut preset = builtin_teams().remove(1);
+        preset.name = "changed".into();
+        assert!(teams.save_team(preset).is_err(), "presets are read-only too");
 
         let mut mine = auto_team();
         mine.id = "t1".into();
@@ -212,12 +317,14 @@ mod tests {
 
         let reloaded = Teams::load(&dir);
         let ids: Vec<String> = reloaded.all().into_iter().map(|t| t.id).collect();
-        assert_eq!(ids, ["auto", "t1"], "auto first, and saving twice replaces");
+        assert_eq!(ids.last().map(String::as_str), Some("t1"), "user teams come after the built-in ones");
+        assert_eq!(ids.iter().filter(|i| *i == "t1").count(), 1, "saving twice replaces");
+        assert!(!reloaded.get("t1").builtin, "a copy of a built-in team is the user's own");
         assert_eq!(reloaded.get("t1").name, "Renamed");
         assert_eq!(reloaded.get("gone").id, AUTO_TEAM, "an unknown team falls back to auto");
 
         reloaded.delete("t1").unwrap();
-        assert_eq!(Teams::load(&dir).all().len(), 1);
+        assert_eq!(Teams::load(&dir).all().len(), builtin_teams().len());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

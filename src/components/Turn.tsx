@@ -87,7 +87,13 @@ export function TurnView(p: TurnProps) {
         <ChatItemView key={m.id} item={m} isLast={false} />
       ))}
       {turn.process.length > 0 && (
-        <ProcessGroup steps={turn.process} running={running} startedAt={turn.user?.startedAt} durationMs={turn.user?.durationMs} />
+        <ProcessGroup
+          steps={turn.process}
+          running={running}
+          streaming={running && !turn.answer}
+          startedAt={turn.user?.startedAt}
+          durationMs={turn.user?.durationMs}
+        />
       )}
       {tasks && tasks.length > 0 && (
         <TaskCard
@@ -109,7 +115,14 @@ export function TurnView(p: TurnProps) {
   );
 }
 
-function ProcessGroup(p: { steps: ChatItem[]; running: boolean; startedAt?: number; durationMs?: number }) {
+function ProcessGroup(p: {
+  steps: ChatItem[];
+  running: boolean;
+  /** Running and no answer yet: the last step is what the agent is doing now. */
+  streaming: boolean;
+  startedAt?: number;
+  durationMs?: number;
+}) {
   // Follows the turn (open while running, folded when done) until the user toggles it.
   const [userOpen, setUserOpen] = useState<boolean | null>(null);
   const open = userOpen ?? p.running;
@@ -136,8 +149,8 @@ function ProcessGroup(p: { steps: ChatItem[]; running: boolean; startedAt?: numb
       </button>
       {open && (
         <div className="process-body">
-          {p.steps.map((step) => (
-            <Step key={step.id} item={step} />
+          {p.steps.map((step, i) => (
+            <Step key={step.id} item={step} live={p.streaming && i === p.steps.length - 1} />
           ))}
         </div>
       )}
@@ -145,10 +158,10 @@ function ProcessGroup(p: { steps: ChatItem[]; running: boolean; startedAt?: numb
   );
 }
 
-function Step({ item }: { item: ChatItem }) {
+function Step({ item, live }: { item: ChatItem; live: boolean }) {
   switch (item.kind) {
     case "thought":
-      return <ThoughtRow text={item.text} />;
+      return <ThoughtRow text={item.text} live={live} />;
     case "tool":
       return <ToolRow item={item} />;
     case "plan":

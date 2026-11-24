@@ -1,4 +1,4 @@
-import { useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -23,6 +23,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import type { ChatItem, PlanEntry, ToolCallContent } from "../types";
+import AttachmentView from "./AttachmentView";
 
 type ToolItem = Extract<ChatItem, { kind: "tool" }>;
 
@@ -106,7 +107,14 @@ export function ChatItemView({ item, isLast }: { item: ChatItem; isLast: boolean
     case "user":
       return (
         <div className="msg-user-wrap">
-          <div className="msg-user">{item.text}</div>
+          {item.text && <div className="msg-user">{item.text}</div>}
+          {item.attachments && item.attachments.length > 0 && (
+            <div className="msg-attachments">
+              {item.attachments.map((a) => (
+                <AttachmentView key={a.path} a={a} large />
+              ))}
+            </div>
+          )}
           <div className="msg-actions">
             <CopyButton text={item.text} />
           </div>
@@ -176,17 +184,33 @@ function CompactionMarker({ item }: { item: Extract<ChatItem, { kind: "compactio
   );
 }
 
-export function ThoughtRow({ text }: { text: string }) {
-  const [open, setOpen] = useState(false);
+/**
+ * `live`: the agent is writing this thought right now. It opens on its own and
+ * follows the text, then folds back to one line, unless the user toggled it.
+ */
+export function ThoughtRow({ text, live = false }: { text: string; live?: boolean }) {
+  const [userOpen, setUserOpen] = useState<boolean | null>(null);
+  const open = userOpen ?? live;
+  const bodyRef = useRef<HTMLDivElement>(null);
   const preview = text.trim().split("\n")[0];
+
+  useEffect(() => {
+    const el = bodyRef.current;
+    if (live && el) el.scrollTop = el.scrollHeight;
+  }, [text, live]);
+
   return (
-    <div className={`trace ${open ? "open" : ""}`}>
-      <button className="trace-head" onClick={() => setOpen(!open)}>
+    <div className={`trace ${open ? "open" : ""} ${live ? "thinking" : ""}`}>
+      <button className="trace-head" onClick={() => setUserOpen(!open)}>
         <Atom size={15} className="trace-icon" />
-        <span className="trace-label">Think</span>
+        <span className="trace-label">{live ? "생각 중" : "Think"}</span>
         {!open && <span className="trace-preview">· {preview}</span>}
       </button>
-      {open && <div className="trace-body thought-text">{text.trim()}</div>}
+      {open && (
+        <div ref={bodyRef} className={`trace-body thought-text ${live ? "live" : ""}`}>
+          {text.trim()}
+        </div>
+      )}
     </div>
   );
 }

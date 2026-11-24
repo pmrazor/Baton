@@ -53,6 +53,10 @@ pub struct AgentDef {
     /// JSON without using any tokens. Empty = the agent can't report them.
     #[serde(default)]
     pub usage_args: Vec<String>,
+    /// Arguments (replacing `args`) that start a Codex app-server, which Baton
+    /// asks for the account's plan limits (`account/rateLimits/read`).
+    #[serde(default)]
+    pub usage_app_server: Vec<String>,
     /// How to get the agent onto this computer, shown when it isn't.
     #[serde(default)]
     pub install: Option<Install>,
@@ -156,6 +160,7 @@ pub fn default_agents() -> Vec<AgentDef> {
             // `opus` is Claude Code's alias for the newest Opus, so it follows upgrades.
             lead_config: HashMap::from([("model".into(), json!("opus"))]),
             usage_args: Vec::new(),
+            usage_app_server: Vec::new(),
             install: via_npx("Node.js만 있으면 돼요. Claude Code 어댑터는 처음 실행할 때 자동으로 받아요."),
         },
         AgentDef {
@@ -201,6 +206,7 @@ pub fn default_agents() -> Vec<AgentDef> {
             login_note: "열린 dsh 웹 화면에서 DeepSeek 계정으로 로그인한 뒤, 터미널에서 Ctrl+C로 종료하세요.".into(),
             lead_config: HashMap::from([("model".into(), json!(r#"["deepseek-account","deepseek-v4-pro"]"#))]),
             usage_args: Vec::new(),
+            usage_app_server: Vec::new(),
             install: Some(Install {
                 unix: Some("npm install -g @deepseek-ai/dsh".into()),
                 windows: Some("npm install -g @deepseek-ai/dsh".into()),
@@ -230,6 +236,7 @@ pub fn default_agents() -> Vec<AgentDef> {
             login_note: "터미널에 나온 주소를 브라우저에서 열어 Google 계정으로 로그인하고, 받은 코드를 터미널에 붙여 넣으세요.".into(),
             lead_config: HashMap::new(),
             usage_args: ["-p", "/usage", "--output-format", "json", "--print-timeout", "30s"].map(String::from).to_vec(),
+            usage_app_server: Vec::new(),
             install: Some(Install {
                 unix: Some("curl -fsSL https://antigravity.google/cli/install.sh | bash".into()),
                 // The official CMD installer, run from %TEMP%. No quotes: the
@@ -262,6 +269,8 @@ pub fn default_agents() -> Vec<AgentDef> {
             login_note: "브라우저에서 ChatGPT 계정으로 로그인하면 끝나요.".into(),
             lead_config: HashMap::new(),
             usage_args: Vec::new(),
+            // The adapter keeps Codex's limits to itself; ask the same Codex version directly.
+            usage_app_server: vec!["-y".into(), "@openai/codex@0.166.0".into(), "app-server".into()],
             install: via_npx("Node.js만 있으면 돼요. Codex 어댑터는 처음 실행할 때 자동으로 받아요."),
         },
     ]
@@ -311,6 +320,10 @@ fn upgrade_builtins(agents: &mut [AgentDef]) -> bool {
         }
         if agent.install.is_none() && builtin.install.is_some() {
             agent.install = builtin.install.clone();
+            changed = true;
+        }
+        if agent.usage_app_server.is_empty() && !builtin.usage_app_server.is_empty() {
+            agent.usage_app_server = builtin.usage_app_server.clone();
             changed = true;
         }
         if agent.usage_args.is_empty() && !builtin.usage_args.is_empty() {

@@ -30,6 +30,25 @@ describe("Antigravity usage reports", () => {
     expect(entries[2].resetsAt).toBeUndefined();
   });
 
+  it("reads Codex limits too", () => {
+    const entries = quotasFromUsageReport({
+      plan: "plus",
+      groups: [
+        {
+          name: "codex",
+          buckets: [
+            { id: "codex-primary", window: "5h", remaining_fraction: 0.4, resets_at: 1_795_521_870 },
+            { id: "codex-secondary", window: "weekly", remaining_fraction: 1 },
+          ],
+        },
+        { name: "GPT-5 Codex Spark", buckets: [{ id: "spark-primary", window: "3d", remaining_fraction: 0.5 }] },
+      ],
+    });
+    expect(entries.map((e) => e.label)).toEqual(["Codex 5시간 한도", "Codex 주간 한도", "GPT-5 Codex Spark 3일 한도"]);
+    expect(entries[0].utilization).toBeCloseTo(60);
+    expect(entries[0].resetsAt).toBe(1_795_521_870_000);
+  });
+
   it("ignores anything else", () => {
     expect(quotasFromUsageReport(null)).toEqual([]);
     expect(quotasFromUsageReport({ groups: "x" })).toEqual([]);

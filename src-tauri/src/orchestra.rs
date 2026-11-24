@@ -271,7 +271,14 @@ impl Orchestra {
         found
     }
 
+    /// Whether this session is a lead (agent mode).
+    pub fn is_lead(&self, agent_id: &str, session_id: &str) -> bool {
+        self.leads.lock().unwrap().values().any(|l| l.agent_id == agent_id && l.session_id.as_deref() == Some(session_id))
+    }
+
     /// Lead-only ACP `_meta`: let the lead call baton tools without prompting.
+    /// Only Claude takes this; other agents ask, and `baton_tool_approval`
+    /// answers for them.
     pub fn lead_meta(agent_id: &str) -> Value {
         if agent_id == "claude" {
             json!({ "claudeCode": { "options": { "allowedTools": [format!("mcp__{SERVER_NAME}")] } } })
@@ -735,7 +742,7 @@ async fn run_turn(app: AppHandle, token: String, task_id: String, message: Strin
     orch.set_status(&task_id, "running");
 
     let prompt = if first { format!("{SUBTASK_PREAMBLE}\n\n{message}") } else { message };
-    let outcome = hub.prompt(&member.agent_id, &session_id, &prompt).await;
+    let outcome = hub.prompt(&member.agent_id, &session_id, &prompt, &[]).await;
     let status = {
         let mut tasks = orch.tasks.lock().unwrap();
         let Some(t) = tasks.get_mut(&task_id) else { return };
@@ -821,7 +828,10 @@ fn usage_summary(info: Option<Value>) -> Value {
                     if let Some(left) = b.get("remaining_fraction").and_then(Value::as_f64) {
                         s.push_str(&format!(" {:.0}% used", (1.0 - left).clamp(0.0, 1.0) * 100.0));
                     }
-                    let reset = b.get("reset_time").and_then(Value::as_str).and_then(parse_rfc3339);
+                    let reset = b
+                        .get("resets_at")
+                        .and_then(Value::as_u64)
+                        .or_else(|| b.get("reset_time").and_then(Value::as_str).and_then(parse_rfc3339));
                     if let Some(text) = reset.and_then(|r| resets_in(now, r)) {
                         s.push_str(&text);
                     }
@@ -854,6 +864,52 @@ fn usage_summary(info: Option<Value>) -> Value {
         })
         .collect();
     Value::String(parts.join("; "))
+}
+
+const TOOL_NAMES: [&str; 8] =
+    ["list_agents", "delegate", "wait", "get_result", "send_followup", "merge_task", "discard_task", "cancel"];
+
+/// Whether `text` names one of Baton's own tools the way agents write MCP
+/// tools: `mcp__baton__delegate` (Claude), `mcp_baton_delegate` (Antigravity),
+/// `baton.delegate`, `baton/delegate`…
+pub fn names_baton_tool(text: &str) -> bool {
+    let text = text.to_ascii_lowercase();
+    let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    text.match_indices(SERVER_NAME).any(|(i, _)| {
+        if text[..i].chars().next_back().is_some_and(|c| c.is_ascii_alphanumeric()) {
+            return false; // part of a longer word
+        }
+        let after = &text[i + SERVER_NAME.len()..];
+        let sep = after.chars().take_while(|c| !c.is_ascii_alphanumeric()).count();
+        if sep == 0 || sep > 3 {
+            return false;
+        }
+        let rest = &after[sep..];
+        TOOL_NAMES.iter().any(|name| rest.starts_with(name) && !rest[name.len()..].starts_with(word))
+    })
+}
+
+/// For a lead's permission request: the option that allows it, if it only
+/// asks to run one of Baton's tools. `earlier` is what the agent reported
+/// about the same tool call before asking (some put the tool name only there).
+pub fn baton_tool_approval(params: &Value, earlier: Option<&str>) -> Option<String> {
+    let call = params.get("toolCall")?;
+    let mut text = call.to_string();
+    if let Some(earlier) = earlier {
+        text.push(' ');
+        text.push_str(earlier);
+    }
+    let server = call.pointer("/input/serverName").or_else(|| call.pointer("/rawInput/serverName")).and_then(Value::as_str);
+    let codex_mcp = params.pointer("/_meta/is_mcp_tool_approval") == Some(&Value::Bool(true)) && server == Some(SERVER_NAME);
+    if !(codex_mcp || names_baton_tool(&text)) {
+        return None;
+    }
+    let options = params.get("options")?.as_array()?;
+    ["allow_once", "allow_always"]
+        .iter()
+        .find_map(|kind| options.iter().find(|o| o.get("kind").and_then(Value::as_str) == Some(kind)))
+        .and_then(|o| o.get("optionId").and_then(Value::as_str))
+        .map(str::to_owned)
 }
 
 /// Unix seconds of a UTC timestamp like "2026-11-24T12:04:30Z" (fractional
@@ -1052,10 +1108,11 @@ mod tests {
                 { "id": "gemini-weekly", "window": "weekly", "remaining_fraction": 1.0, "reset_time": "2020-01-01T00:00:00Z" },
             ]},
             { "name": "Claude and GPT models", "buckets": [{ "id": "3p-5h", "window": "5h", "remaining_fraction": 0.0 }] },
+            { "name": "codex", "buckets": [{ "id": "codex-primary", "window": "5h", "remaining_fraction": 0.5, "resets_at": soon }] },
         ]});
         assert_eq!(
             usage_summary(Some(info)),
-            json!("Gemini Models 5h 25% used (resets in 1h 5m); Gemini Models weekly 0% used; Claude and GPT models 5h 100% used")
+            json!("Gemini Models 5h 25% used (resets in 1h 5m); Gemini Models weekly 0% used; Claude and GPT models 5h 100% used; codex 5h 50% used (resets in 1h 5m)")
         );
     }
 
@@ -1079,6 +1136,46 @@ mod tests {
         assert_eq!(parse_rfc3339("2024-02-29T23:59:59.999Z"), Some(1709251199));
         assert_eq!(parse_rfc3339("2026-11-24T12:04:30+09:00"), None);
         assert_eq!(parse_rfc3339("tomorrow"), None);
+    }
+
+    #[test]
+    fn recognises_baton_tool_names() {
+        for yes in ["mcp__baton__delegate", "Run mcp_baton_list_agents", "baton.wait", "baton/get_result", "Baton: merge_task"] {
+            assert!(names_baton_tool(yes), "{yes}");
+        }
+        for no in ["mcp_other_delegate", "rm -rf baton_wait_x", "mybaton_delegate", "baton_delegates", "baton", "delegate"] {
+            assert!(!names_baton_tool(no), "{no}");
+        }
+    }
+
+    #[test]
+    fn approves_only_baton_tools() {
+        let options = json!([
+            { "optionId": "deny", "name": "Deny", "kind": "reject_once" },
+            { "optionId": "allow", "name": "Allow", "kind": "allow_once" },
+        ]);
+        // Antigravity, as captured from agy 1.5.16.
+        let agy = json!({ "sessionId": "s", "options": options, "toolCall": {
+            "toolCallId": "call_1", "name": "mcp_baton_list_agents", "title": "Run mcp_baton_list_agents",
+            "kind": "other", "rawInput": { "toolSummary": "List team members" } } });
+        assert_eq!(baton_tool_approval(&agy, None).as_deref(), Some("allow"));
+
+        // Codex: the request may carry only the call id; the name came earlier.
+        let codex = json!({ "sessionId": "s", "options": options, "_meta": { "is_mcp_tool_approval": true },
+            "toolCall": { "toolCallId": "c1", "kind": "execute", "status": "pending" } });
+        assert_eq!(baton_tool_approval(&codex, Some(r#"{"title":"baton.delegate"}"#)).as_deref(), Some("allow"));
+        assert_eq!(baton_tool_approval(&codex, Some(r#"{"title":"github.create_issue"}"#)), None);
+        let standalone = json!({ "sessionId": "s", "options": options, "_meta": { "is_mcp_tool_approval": true },
+            "toolCall": { "toolCallId": "c2", "title": "MCP tool call approval", "input": { "serverName": "baton" } } });
+        assert_eq!(baton_tool_approval(&standalone, None).as_deref(), Some("allow"));
+
+        // Anything else still goes to the user.
+        let shell = json!({ "sessionId": "s", "options": options,
+            "toolCall": { "toolCallId": "t", "title": "Run rm -rf build", "kind": "execute" } });
+        assert_eq!(baton_tool_approval(&shell, None), None);
+        let always_only = json!({ "options": [{ "optionId": "yes", "kind": "allow_always" }],
+            "toolCall": { "title": "mcp__baton__wait" } });
+        assert_eq!(baton_tool_approval(&always_only, None).as_deref(), Some("yes"));
     }
 
     #[test]

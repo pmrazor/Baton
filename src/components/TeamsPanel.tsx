@@ -7,6 +7,7 @@ import {
   AUTO_TEAM,
   DEFAULT_PROFILE,
   installedAgents,
+  usableTeams,
   type AgentInfo,
   type ConfigOption,
   type SelectOption,
@@ -103,6 +104,7 @@ export default function TeamsPanel({ state, onChanged }: { state: State; onChang
     ...t,
     id: `team-${Date.now()}`,
     name: t.id === AUTO_TEAM ? "내 팀" : `${t.name} 복사본`,
+    builtin: false,
   });
 
   return (
@@ -119,19 +121,19 @@ export default function TeamsPanel({ state, onChanged }: { state: State; onChang
         </button>
       </div>
       <ul className="team-list">
-        {state.teams.map((t) => (
+        {usableTeams(state.teams, state.agents).map((t) => (
           <li key={t.id}>
             <div className="grow">
               <div className="team-name">
                 {t.name}
-                {t.id === AUTO_TEAM && <span className="pill subtle">기본 제공</span>}
+                {t.builtin && <span className="pill subtle">기본 제공</span>}
                 <span className="muted small">
                   동시 {t.maxParallel}개 · {t.isolation === "shared" ? "같은 폴더" : "작업별 분리"}
                 </span>
               </div>
               <div className="muted small ellipsis">{t.members.map((m) => m.name).join(" · ")}</div>
             </div>
-            {t.id === AUTO_TEAM ? (
+            {t.builtin ? (
               <button className="btn small-btn" onClick={() => setEditing(copyOf(t))}>
                 <Copy size={14} /> 복제해서 새 팀으로
               </button>

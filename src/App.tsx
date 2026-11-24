@@ -2,7 +2,16 @@ import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { ask, open } from "@tauri-apps/plugin-dialog";
 import { api, subscribe, toHubError } from "./api";
 import { initialState, reducer, type State } from "./store";
-import { AUTO_TEAM, installedAgents, isTaskActive, profileOf, sessionKey, type Launch, type Session } from "./types";
+import {
+  AUTO_TEAM,
+  installedAgents,
+  isTaskActive,
+  profileOf,
+  sessionKey,
+  type Attachment,
+  type Launch,
+  type Session,
+} from "./types";
 import Sidebar from "./components/Sidebar";
 import ChatView, { TitleBar, type Tab } from "./components/ChatView";
 import SettingsModal, { type SettingsTab } from "./components/SettingsModal";
@@ -455,16 +464,24 @@ export default function App() {
     [state.sessions],
   );
 
-  const sendPrompt = useCallback(async (session: Session, text: string) => {
+  const sendPrompt = useCallback(async (session: Session, text: string, attachments: Attachment[] = []) => {
     const { key, agentId, sessionId } = session;
     const profileId = profileOf(session.launch);
     // A message typed into a delegated task also reaches its lead.
-    if (session.parent) api.taskNote(session.parent.taskId, text).catch(() => {});
-    dispatch({ type: "userMessage", key, text });
+    if (session.parent) {
+      const files = attachments.length ? `\n(첨부: ${attachments.map((a) => a.path).join(", ")})` : "";
+      api.taskNote(session.parent.taskId, text + files).catch(() => {});
+    }
+    dispatch({ type: "userMessage", key, text, attachments });
     dispatch({ type: "busy", key, busy: true });
     const started = performance.now();
     try {
-      const res = await api.sendPrompt(agentId, sessionId, text);
+      const res = await api.sendPrompt(
+        agentId,
+        sessionId,
+        text,
+        attachments.map((a) => a.path),
+      );
       dispatch({
         type: "turnDone",
         key,
