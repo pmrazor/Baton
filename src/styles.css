@@ -1297,6 +1297,42 @@ button {
   user-select: text;
   -webkit-user-select: text;
 }
+.settings-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.settings-head .btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.settings-agents .grow {
+  min-width: 0;
+}
+.install-cmd {
+  display: block;
+  margin-top: 4px;
+  padding: 3px 6px;
+  border-radius: 6px;
+  background: var(--surface-2);
+  font: 11.5px/1.5 var(--mono);
+  overflow-wrap: anywhere;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.install-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+}
+.install-actions .btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
 
 /* ---------- primitives ---------- */
 .btn {

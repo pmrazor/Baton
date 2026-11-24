@@ -9,6 +9,7 @@ import type {
   Launch,
   PermissionRequest,
   Profile,
+  QuotaEntry,
   Session,
   SessionModes,
   TaskInfo,
@@ -103,6 +104,7 @@ export type Action =
   | { type: "notice"; key: string; text: string; tone: "info" | "error" }
   | { type: "update"; agentId: string; profileId: string; sessionId: string; update: any }
   | { type: "auth"; agentId: string; profileId: string; status: AuthStatus | null }
+  | { type: "accountUsage"; agentId: string; profileId: string; quotas: QuotaEntry[] }
   | { type: "profiles"; profiles: Profile[] }
   | { type: "teams"; teams: Team[] }
   | { type: "leadTeam"; key: string; teamId: string }
@@ -290,6 +292,12 @@ export function reducer(state: State, action: Action): State {
         ...next,
         accountUsage: { ...next.accountUsage, [account]: { entries, updatedAt: Date.now() } },
       };
+    }
+    case "accountUsage": {
+      // A full report: it replaces what the account showed before.
+      const account = accountKey(action.agentId, action.profileId);
+      const entries = Object.fromEntries(action.quotas.map((q) => [q.id, q]));
+      return { ...state, accountUsage: { ...state.accountUsage, [account]: { entries, updatedAt: Date.now() } } };
     }
     case "auth": {
       const account = accountKey(action.agentId, action.profileId);

@@ -37,6 +37,15 @@ pub fn command_line(command: &str, args: &[String], env: &[(String, String)]) ->
 }
 
 pub fn open_in_terminal(cmdline: &str) -> Result<(), String> {
+    // Terminal.app starts a fresh login shell; elsewhere the terminal inherits
+    // this process's environment, so hand it the up-to-date PATH.
+    let path = crate::shell_env::refreshed_path();
+    let with_path = |mut cmd: Command| {
+        if let Some(p) = &path {
+            cmd.env("PATH", p);
+        }
+        cmd
+    };
     let result = if cfg!(target_os = "macos") {
         let escaped = cmdline.replace('\\', "\\\\").replace('"', "\\\"");
         Command::new("osascript")
@@ -48,13 +57,13 @@ pub fn open_in_terminal(cmdline: &str) -> Result<(), String> {
             ])
             .spawn()
     } else if cfg!(windows) {
-        Command::new("cmd").args(["/C", "start", "", "cmd", "/K", cmdline]).spawn()
+        with_path(Command::new("cmd")).args(["/C", "start", "", "cmd", "/K", cmdline]).spawn()
     } else {
         let script = format!("{cmdline}; echo; read -p '완료되면 Enter를 누르세요...' _");
         ["x-terminal-emulator", "gnome-terminal", "konsole", "xterm"]
             .iter()
             .find_map(|term| {
-                let mut cmd = Command::new(term);
+                let mut cmd = with_path(Command::new(term));
                 if *term == "gnome-terminal" {
                     cmd.args(["--", "sh", "-c", &script]);
                 } else {

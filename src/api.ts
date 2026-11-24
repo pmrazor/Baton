@@ -41,6 +41,9 @@ export interface NewSessionResult {
 export const api = {
   listAgents: () => invoke<AgentInfo[]>("list_agents"),
   agentsConfigPath: () => invoke<string>("agents_config_path"),
+  /** Re-read PATH (after installing an agent) and list agents again. */
+  refreshAgents: () => invoke<AgentInfo[]>("refresh_agents"),
+  installAgent: (agentId: string) => invoke<void>("install_agent", { agentId }),
   newSession: (agentId: string, cwd: string, launch: Launch) =>
     invoke<NewSessionResult>("new_session", { agentId, cwd, launch }),
   newLeadSession: (agentId: string, cwd: string, launch: Launch, teamId: string) =>
@@ -111,6 +114,8 @@ export interface HubEvents {
   onTask: (task: TaskInfo) => void;
   onTaskSession: (e: TaskSessionEvent) => void;
   onTaskBrief: (task: TaskInfo, text: string) => void;
+  /** An account's plan limits, read with the agent's usage command (Antigravity). */
+  onAccountUsage: (agentId: string, profileId: string, usage: unknown) => void;
 }
 
 export interface TaskSessionEvent {
@@ -142,6 +147,9 @@ export async function subscribe(h: HubEvents): Promise<UnlistenFn> {
     listen<TaskInfo>("task-update", (e) => h.onTask(e.payload)),
     listen<TaskSessionEvent>("task-session", (e) => h.onTaskSession(e.payload)),
     listen<{ task: TaskInfo; text: string }>("task-brief", (e) => h.onTaskBrief(e.payload.task, e.payload.text)),
+    listen<{ agentId: string; profileId: string; usage: unknown }>("account-usage", (e) =>
+      h.onAccountUsage(e.payload.agentId, e.payload.profileId, e.payload.usage),
+    ),
   ]);
   return () => offs.forEach((off) => off());
 }

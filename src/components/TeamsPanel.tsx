@@ -6,6 +6,7 @@ import type { State } from "../store";
 import {
   AUTO_TEAM,
   DEFAULT_PROFILE,
+  installedAgents,
   type AgentInfo,
   type ConfigOption,
   type SelectOption,
@@ -177,7 +178,7 @@ function TeamEditor(p: {
   const [team, setTeam] = useState<Team>(p.team);
   const setMember = (i: number, m: TeamMember) =>
     setTeam((t) => ({ ...t, members: t.members.map((x, n) => (n === i ? m : x)) }));
-  const firstAgent = p.state.agents[0]?.id ?? "claude";
+  const firstAgent = installedAgents(p.state.agents)[0]?.id ?? p.state.agents[0]?.id ?? "claude";
 
   return (
     <div className="team-editor">
@@ -305,11 +306,13 @@ function MemberRow(p: {
           value={m.agentId}
           onChange={(e) => p.onChange({ ...m, agentId: e.target.value, profileId: DEFAULT_PROFILE, launch: {}, config: {} })}
         >
-          {p.state.agents.map((a) => (
-            <option key={a.id} value={a.id}>
-              {a.name}
-            </option>
-          ))}
+          {p.state.agents
+            .filter((a) => a.installed || a.id === m.agentId)
+            .map((a) => (
+              <option key={a.id} value={a.id}>
+                {a.installed ? a.name : `${a.name} (설치 안 됨)`}
+              </option>
+            ))}
         </select>
         {accounts.length > 0 && (
           <select

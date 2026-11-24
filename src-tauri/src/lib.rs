@@ -26,6 +26,26 @@ async fn list_agents(hub: State<'_, Hub>) -> Result<Vec<AgentInfo>, HubError> {
     Ok(hub.list().await)
 }
 
+/// Read PATH again (an agent may have just been installed) and list agents.
+#[tauri::command]
+async fn refresh_agents(hub: State<'_, Hub>) -> Result<Vec<AgentInfo>, HubError> {
+    let _ = tokio::task::spawn_blocking(shell_env::refresh_path).await;
+    Ok(hub.list().await)
+}
+
+/// Run the agent's official install command in a terminal, where the user
+/// sees what runs.
+#[tauri::command]
+fn install_agent(hub: State<'_, Hub>, agent_id: String) -> Result<(), HubError> {
+    let def = hub.def(&agent_id)?;
+    let command = def
+        .install
+        .as_ref()
+        .and_then(|i| i.command())
+        .ok_or_else(|| plain_error("이 에이전트는 자동 설치 명령이 없어요. 설치 안내 페이지를 참고해 주세요."))?;
+    login::open_in_terminal(command).map_err(plain_error)
+}
+
 #[tauri::command]
 fn agents_config_path(app: tauri::AppHandle) -> Result<String, String> {
     let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
@@ -436,6 +456,8 @@ pub fn run() {
             set_mode,
             stop_agent,
             open_login_terminal,
+            refresh_agents,
+            install_agent,
             login_profile,
             list_profiles,
             create_profile,

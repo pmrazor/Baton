@@ -366,6 +366,7 @@ impl Orchestra {
         let members: Vec<Value> = team
             .members
             .iter()
+            .filter(|m| installed(&hub, &m.agent_id))
             .map(|m| {
                 let account = if m.profile_id == DEFAULT_PROFILE {
                     "default".to_string()
@@ -399,6 +400,9 @@ impl Orchestra {
             .find(|m| m.id == member_id)
             .cloned()
             .ok_or_else(|| format!("unknown member '{member_id}'; call list_agents for valid ids"))?;
+        if !installed(&self.app.state::<Hub>(), &member.agent_id) {
+            return Err(format!("member '{member_id}' is not available: its agent is not installed on this computer"));
+        }
         let task_text = args.get("task").and_then(Value::as_str).filter(|t| !t.trim().is_empty()).ok_or("task is required")?;
         let title = args
             .get("title")
@@ -779,6 +783,12 @@ fn wrap_lead_text(text: &str, team: Option<&str>) -> String {
     }
 }
 
+/// Whether a member's agent program exists here (teams may list agents the
+/// user never installed, e.g. the auto team's Antigravity members).
+fn installed(hub: &Hub, agent_id: &str) -> bool {
+    hub.def(agent_id).is_ok_and(|d| crate::agents::command_exists(&d.command))
+}
+
 fn fail(orch: &Orchestra, task_id: &str, message: &str) {
     if let Some(t) = orch.tasks.lock().unwrap().get_mut(task_id) {
         t.info.error = Some(message.into());
@@ -786,9 +796,41 @@ fn fail(orch: &Orchestra, task_id: &str, message: &str) {
     orch.set_status(task_id, "failed");
 }
 
-/// "five_hour 10% used (resets in 2h 10m); seven_day 24% used" from Claude's rate-limit report.
+/// "5h 10% used (resets in 2h 10m)" for a reset time in Unix seconds.
+fn resets_in(now: u64, reset: u64) -> Option<String> {
+    (reset > now).then(|| {
+        let mins = (reset - now) / 60;
+        format!(" (resets in {}h {}m)", mins / 60, mins % 60)
+    })
+}
+
+/// One line per limit window for the lead, e.g. "five_hour 10% used (resets
+/// in 2h 10m); seven_day 24% used", from Claude's rate-limit report or an
+/// Antigravity usage report (limit groups with remaining fractions).
 fn usage_summary(info: Option<Value>) -> Value {
     let Some(info) = info else { return Value::Null };
+    if let Some(groups) = info.get("groups").and_then(Value::as_array) {
+        let now = now_ms() / 1000;
+        let parts: Vec<String> = groups
+            .iter()
+            .flat_map(|g| {
+                let group = g.get("name").and_then(Value::as_str).unwrap_or("models").to_string();
+                g.get("buckets").and_then(Value::as_array).cloned().unwrap_or_default().into_iter().map(move |b| {
+                    let window = b.get("window").and_then(Value::as_str).unwrap_or("limit");
+                    let mut s = format!("{group} {window}");
+                    if let Some(left) = b.get("remaining_fraction").and_then(Value::as_f64) {
+                        s.push_str(&format!(" {:.0}% used", (1.0 - left).clamp(0.0, 1.0) * 100.0));
+                    }
+                    let reset = b.get("reset_time").and_then(Value::as_str).and_then(parse_rfc3339);
+                    if let Some(text) = reset.and_then(|r| resets_in(now, r)) {
+                        s.push_str(&text);
+                    }
+                    s
+                })
+            })
+            .collect();
+        return Value::String(parts.join("; "));
+    }
     let windows = info.get("unifiedWindows").and_then(Value::as_object);
     let Some(windows) = windows else {
         return info.get("status").cloned().unwrap_or(Value::Null);
@@ -805,14 +847,32 @@ fn usage_summary(info: Option<Value>) -> Value {
             if let Some(status) = w.get("status").and_then(Value::as_str).filter(|s| *s != "allowed") {
                 s.push_str(&format!(" [{status}]"));
             }
-            if let Some(reset) = w.get("resetsAt").and_then(Value::as_u64).filter(|r| *r > now) {
-                let mins = (reset - now) / 60;
-                s.push_str(&format!(" (resets in {}h {}m)", mins / 60, mins % 60));
+            if let Some(text) = w.get("resetsAt").and_then(Value::as_u64).and_then(|r| resets_in(now, r)) {
+                s.push_str(&text);
             }
             s
         })
         .collect();
     Value::String(parts.join("; "))
+}
+
+/// Unix seconds of a UTC timestamp like "2026-11-24T12:04:30Z" (fractional
+/// seconds ignored). Only the UTC "Z" form is accepted.
+fn parse_rfc3339(text: &str) -> Option<u64> {
+    let t = text.strip_suffix('Z')?;
+    let (date, time) = t.split_once('T')?;
+    let mut d = date.split('-').map(|p| p.parse::<i64>().ok());
+    let (y, m, day) = (d.next()??, d.next()??, d.next()??);
+    let mut c = time.split('.').next()?.split(':').map(|p| p.parse::<i64>().ok());
+    let (h, min, sec) = (c.next()??, c.next()??, c.next()??);
+    // Days from civil (Howard Hinnant's algorithm).
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe - 719468;
+    u64::try_from(days * 86400 + h * 3600 + min * 60 + sec).ok()
 }
 
 fn tool_list() -> Value {
@@ -974,6 +1034,51 @@ mod tests {
         // Percent given as 0–100 stays as is; a reset in the past is dropped.
         assert!(text.contains("seven_day 87% used [allowed_warning]"), "{text}");
         assert!(!text.contains("seven_day 87% used [allowed_warning] (resets"), "{text}");
+    }
+
+    #[test]
+    fn usage_summary_reads_antigravity_groups() {
+        let soon = now_ms() / 1000 + 3600 + 5 * 60 + 30;
+        let reset = |secs: u64| {
+            // Format back to RFC 3339 through the parser's inverse: search the day.
+            let days = secs / 86400;
+            let rem = secs % 86400;
+            let (y, m, d) = civil(days as i64);
+            format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}.5Z", rem / 3600, rem % 3600 / 60, rem % 60)
+        };
+        let info = json!({ "groups": [
+            { "name": "Gemini Models", "buckets": [
+                { "id": "gemini-5h", "window": "5h", "remaining_fraction": 0.75, "reset_time": reset(soon) },
+                { "id": "gemini-weekly", "window": "weekly", "remaining_fraction": 1.0, "reset_time": "2020-01-01T00:00:00Z" },
+            ]},
+            { "name": "Claude and GPT models", "buckets": [{ "id": "3p-5h", "window": "5h", "remaining_fraction": 0.0 }] },
+        ]});
+        assert_eq!(
+            usage_summary(Some(info)),
+            json!("Gemini Models 5h 25% used (resets in 1h 5m); Gemini Models weekly 0% used; Claude and GPT models 5h 100% used")
+        );
+    }
+
+    /// (year, month, day) of a day count since 1970-01-01, to check parse_rfc3339 against.
+    fn civil(z: i64) -> (i64, i64, i64) {
+        let z = z + 719468;
+        let era = z.div_euclid(146097);
+        let doe = z - era * 146097;
+        let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let d = doy - (153 * mp + 2) / 5 + 1;
+        let m = if mp < 10 { mp + 3 } else { mp - 9 };
+        (yoe + era * 400 + i64::from(m <= 2), m, d)
+    }
+
+    #[test]
+    fn parses_utc_timestamps() {
+        assert_eq!(parse_rfc3339("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(parse_rfc3339("2026-11-24T12:04:30Z"), Some(1795521870));
+        assert_eq!(parse_rfc3339("2024-02-29T23:59:59.999Z"), Some(1709251199));
+        assert_eq!(parse_rfc3339("2026-11-24T12:04:30+09:00"), None);
+        assert_eq!(parse_rfc3339("tomorrow"), None);
     }
 
     #[test]

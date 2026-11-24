@@ -147,6 +147,20 @@ describe("streaming a turn", () => {
   });
 });
 
+describe("account usage", () => {
+  it("a usage report replaces the account's entries", () => {
+    const entry = (id: string) => ({ id, label: id, status: "ok" as const });
+    let state = run(initialState, {
+      type: "accountUsage",
+      agentId: "antigravity",
+      profileId: "default",
+      quotas: [entry("a"), entry("b")],
+    });
+    state = run(state, { type: "accountUsage", agentId: "antigravity", profileId: "default", quotas: [entry("c")] });
+    expect(Object.keys(state.accountUsage["antigravity/default"].entries)).toEqual(["c"]);
+  });
+});
+
 describe("agent mode tasks", () => {
   const lead = () =>
     run(initialState, created("lead", { lead: { teamId: "auto" } }), { type: "userMessage", key: "claude:lead", text: "first" });

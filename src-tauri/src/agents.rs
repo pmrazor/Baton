@@ -49,6 +49,45 @@ pub struct AgentDef {
     /// Config options for a lead (agent mode) session, on top of `defaultConfig`.
     #[serde(default)]
     pub lead_config: HashMap<String, Value>,
+    /// Arguments (replacing `args`) that print the account's plan limits as
+    /// JSON without using any tokens. Empty = the agent can't report them.
+    #[serde(default)]
+    pub usage_args: Vec<String>,
+    /// How to get the agent onto this computer, shown when it isn't.
+    #[serde(default)]
+    pub install: Option<Install>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Install {
+    /// Shell line run in a terminal on macOS and Linux.
+    #[serde(default)]
+    pub unix: Option<String>,
+    /// Command line run in a terminal (cmd.exe) on Windows.
+    #[serde(default)]
+    pub windows: Option<String>,
+    /// Programs that must exist first, e.g. "npm".
+    #[serde(default)]
+    pub requires: Vec<String>,
+    /// Official install page.
+    pub url: String,
+    #[serde(default)]
+    pub note: String,
+}
+
+impl Install {
+    /// The command for this platform, if it can be installed from a terminal.
+    pub fn command(&self) -> Option<&str> {
+        if cfg!(windows) { self.windows.as_deref() } else { self.unix.as_deref() }
+    }
+}
+
+const NODE_URL: &str = "https://nodejs.org/en/download";
+
+/// Agents started through `npx`: nothing to install but Node.js.
+fn via_npx(note: &str) -> Option<Install> {
+    Some(Install { unix: None, windows: None, requires: vec!["npx".into()], url: NODE_URL.into(), note: note.into() })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -116,6 +155,8 @@ pub fn default_agents() -> Vec<AgentDef> {
             login_note: "브라우저에서 Claude 계정으로 로그인하면 끝나요.".into(),
             // `opus` is Claude Code's alias for the newest Opus, so it follows upgrades.
             lead_config: HashMap::from([("model".into(), json!("opus"))]),
+            usage_args: Vec::new(),
+            install: via_npx("Node.js만 있으면 돼요. Claude Code 어댑터는 처음 실행할 때 자동으로 받아요."),
         },
         AgentDef {
             id: "dsh".into(),
@@ -159,6 +200,69 @@ pub fn default_agents() -> Vec<AgentDef> {
             login_args: vec!["web".into()],
             login_note: "열린 dsh 웹 화면에서 DeepSeek 계정으로 로그인한 뒤, 터미널에서 Ctrl+C로 종료하세요.".into(),
             lead_config: HashMap::from([("model".into(), json!(r#"["deepseek-account","deepseek-v4-pro"]"#))]),
+            usage_args: Vec::new(),
+            install: Some(Install {
+                unix: Some("npm install -g @deepseek-ai/dsh".into()),
+                windows: Some("npm install -g @deepseek-ai/dsh".into()),
+                requires: vec!["npm".into()],
+                url: "https://www.npmjs.com/package/@deepseek-ai/dsh".into(),
+                note: String::new(),
+            }),
+        },
+        AgentDef {
+            id: "antigravity".into(),
+            name: "Antigravity".into(),
+            description: "Google Antigravity CLI (agy) and its built-in ACP server".into(),
+            command: "agy".into(),
+            // Each session in its own worker: required for the HTTP MCP server
+            // a lead gets, and keeps one session's hang from blocking others.
+            args: vec!["acp".into(), "--process-per-session".into()],
+            env: HashMap::new(),
+            login_hint: "상단 배너의 로그인 버튼으로 Google 계정에 로그인하세요.".into(),
+            // The account decides which models exist; start on its default.
+            default_config: HashMap::new(),
+            // agy expects the project folder as its working directory.
+            process_per_workspace: true,
+            launch_options: Vec::new(),
+            // The login lives in the OS keychain, shared by every agy process.
+            profile_env: None,
+            login_args: vec!["acp".into(), "--login".into()],
+            login_note: "터미널에 나온 주소를 브라우저에서 열어 Google 계정으로 로그인하고, 받은 코드를 터미널에 붙여 넣으세요.".into(),
+            lead_config: HashMap::new(),
+            usage_args: ["-p", "/usage", "--output-format", "json", "--print-timeout", "30s"].map(String::from).to_vec(),
+            install: Some(Install {
+                unix: Some("curl -fsSL https://antigravity.google/cli/install.sh | bash".into()),
+                // The official CMD installer, run from %TEMP%. No quotes: the
+                // line passes through `cmd /C start … cmd /K`, and `cd` takes
+                // a path with spaces as is.
+                windows: Some(
+                    "cd /d %TEMP% && curl -fsSL https://antigravity.google/cli/install.cmd -o agy-install.cmd && agy-install.cmd && del agy-install.cmd".into(),
+                ),
+                requires: Vec::new(),
+                url: "https://antigravity.google/docs/getting-started?tab=cli".into(),
+                note: "Google 공식 설치 스크립트예요.".into(),
+            }),
+        },
+        AgentDef {
+            id: "codex".into(),
+            name: "Codex".into(),
+            description: "OpenAI Codex via the official ACP adapter".into(),
+            command: "npx".into(),
+            args: vec!["-y".into(), "@agentclientprotocol/codex-acp@2.6.0".into()],
+            env: HashMap::new(),
+            login_hint: "로그인 버튼을 누르면 터미널에서 ChatGPT 계정 로그인이 열려요.".into(),
+            default_config: HashMap::new(),
+            process_per_workspace: false,
+            launch_options: Vec::new(),
+            // Codex keeps config and auth.json in CODEX_HOME (default ~/.codex).
+            profile_env: Some("CODEX_HOME".into()),
+            // The adapter has no login of its own; the Codex CLI's login writes
+            // the auth.json it reads. 0.166 is the version this adapter bundles.
+            login_args: vec!["-y".into(), "@openai/codex@0.166.0".into(), "login".into()],
+            login_note: "브라우저에서 ChatGPT 계정으로 로그인하면 끝나요.".into(),
+            lead_config: HashMap::new(),
+            usage_args: Vec::new(),
+            install: via_npx("Node.js만 있으면 돼요. Codex 어댑터는 처음 실행할 때 자동으로 받아요."),
         },
     ]
 }
@@ -173,7 +277,7 @@ pub fn load_or_init(config_dir: &Path) -> Result<Vec<AgentDef>, String> {
         Ok(text) => {
             let mut agents: Vec<AgentDef> =
                 serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
-            if upgrade_builtins(&mut agents) {
+            if upgrade_builtins(&mut agents) | add_missing_builtins(&mut agents) {
                 // Best effort: the in-memory upgrade applies either way.
                 let _ = serde_json::to_string_pretty(&agents).map(|t| std::fs::write(&path, t));
             }
@@ -205,6 +309,14 @@ fn upgrade_builtins(agents: &mut [AgentDef]) -> bool {
             agent.lead_config = builtin.lead_config.clone();
             changed = true;
         }
+        if agent.install.is_none() && builtin.install.is_some() {
+            agent.install = builtin.install.clone();
+            changed = true;
+        }
+        if agent.usage_args.is_empty() && !builtin.usage_args.is_empty() {
+            agent.usage_args = builtin.usage_args.clone();
+            changed = true;
+        }
         if agent.profile_env.is_none() && builtin.profile_env.is_some() {
             agent.profile_env = builtin.profile_env.clone();
             agent.login_args = builtin.login_args.clone();
@@ -213,6 +325,43 @@ fn upgrade_builtins(agents: &mut [AgentDef]) -> bool {
         }
     }
     changed
+}
+
+/// Append built-in agents added in a later version (e.g. Antigravity) to an
+/// existing agents.json. Returns whether anything was added.
+fn add_missing_builtins(agents: &mut Vec<AgentDef>) -> bool {
+    let missing: Vec<AgentDef> =
+        default_agents().into_iter().filter(|d| !agents.iter().any(|a| a.id == d.id)).collect();
+    let added = !missing.is_empty();
+    agents.extend(missing);
+    added
+}
+
+/// Whether `command` can be started: an existing path, or a program on PATH.
+pub fn command_exists(command: &str) -> bool {
+    let path = Path::new(command);
+    if path.components().count() > 1 {
+        return path.is_file();
+    }
+    let Some(dirs) = crate::shell_env::path() else { return false };
+    #[cfg(windows)]
+    let exts: Vec<String> = std::env::var("PATHEXT")
+        .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into())
+        .split(';')
+        .map(|e| e.to_ascii_lowercase())
+        .collect();
+    std::env::split_paths(&dirs).any(|dir| {
+        let candidate = dir.join(command);
+        #[cfg(windows)]
+        {
+            exts.iter().any(|ext| dir.join(format!("{command}{ext}")).is_file()) || candidate.is_file()
+        }
+        #[cfg(not(windows))]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            candidate.metadata().is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        }
+    })
 }
 
 #[cfg(test)]
@@ -258,6 +407,45 @@ mod tests {
     }
 
     #[test]
+    fn new_builtins_join_an_existing_agents_json() {
+        let dir = std::env::temp_dir().join(format!("baton-agents-new-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // agents.json written by a version that only knew Claude and dsh, plus a user's own agent.
+        let mut old: Vec<AgentDef> =
+            default_agents().into_iter().filter(|a| a.id == "claude" || a.id == "dsh").collect();
+        let mut mine = dsh();
+        mine.id = "mine".into();
+        old.push(mine);
+        std::fs::write(config_path(&dir), serde_json::to_string(&old).unwrap()).unwrap();
+
+        let ids: Vec<String> = load_or_init(&dir).unwrap().into_iter().map(|a| a.id).collect();
+        assert_eq!(ids, ["claude", "dsh", "mine", "antigravity", "codex"]);
+        let saved: Vec<AgentDef> = serde_json::from_str(&std::fs::read_to_string(config_path(&dir)).unwrap()).unwrap();
+        assert_eq!(saved.len(), 5, "the additions are written back");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn every_builtin_says_how_to_install_it() {
+        for agent in default_agents() {
+            let install = agent.install.unwrap_or_else(|| panic!("{} has no install info", agent.id));
+            assert!(install.url.starts_with("https://"), "{}", agent.id);
+            assert!(install.command().is_some() || !install.requires.is_empty(), "{}: nothing to do", agent.id);
+        }
+    }
+
+    #[test]
+    fn finds_commands_on_path() {
+        #[cfg(unix)]
+        assert!(command_exists("sh"));
+        #[cfg(windows)]
+        assert!(command_exists("cmd"));
+        assert!(!command_exists("baton-no-such-command-xyz"));
+        assert!(!command_exists("/no/such/dir/agy"));
+    }
+
+    #[test]
     fn agents_json_is_created_then_reloaded() {
         let dir = std::env::temp_dir().join(format!("baton-agents-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -266,7 +454,7 @@ mod tests {
         let second = load_or_init(&dir).unwrap();
         let ids = |a: &[AgentDef]| a.iter().map(|d| d.id.clone()).collect::<Vec<_>>();
         assert_eq!(ids(&first), ids(&second));
-        assert_eq!(ids(&first), ["claude", "dsh"]);
+        assert_eq!(ids(&first), ["claude", "dsh", "antigravity", "codex"]);
 
         std::fs::write(config_path(&dir), "not json").unwrap();
         assert!(load_or_init(&dir).is_err(), "a broken file is reported, not overwritten");

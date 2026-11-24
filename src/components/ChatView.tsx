@@ -1,10 +1,11 @@
 import { useEffect, useRef, type ReactNode } from "react";
-import { FolderPlus } from "lucide-react";
+import { Download, FolderPlus } from "lucide-react";
 import { api } from "../api";
 import type { State } from "../store";
 import {
   accountKey,
   DEFAULT_PROFILE,
+  installedAgents,
   profileOf,
   sessionKey,
   type ChatItem,
@@ -33,6 +34,8 @@ interface Props {
   onSetConfig: (session: Session, configId: string, value: unknown) => void;
   onSetMode: (session: Session, modeId: string) => void;
   onDismissAuth: () => void;
+  /** Open settings on the agents tab (install / manage). */
+  onOpenAgents: () => void;
   agentMode: boolean;
   teamId: string;
   onChangeMode: (opts: { lead?: boolean; team?: string }) => void;
@@ -141,7 +144,15 @@ export default function ChatView(p: Props) {
       )}
       {state.authPrompt && <AuthBanner {...p} agentName={agentName(state.authPrompt.agentId)} />}
 
-      {!state.workspace ? (
+      {state.agents.length > 0 && installedAgents(state.agents).length === 0 ? (
+        <div className="welcome">
+          <h1>에이전트를 하나 설치해 주세요</h1>
+          <p className="muted">Baton은 이 컴퓨터에 설치된 코딩 에이전트와 대화해요. 아직 찾은 에이전트가 없어요.</p>
+          <button className="btn btn-primary" onClick={p.onOpenAgents}>
+            <Download size={16} /> 에이전트 설치
+          </button>
+        </div>
+      ) : !state.workspace ? (
         <div className="welcome">
           <h1>작업할 폴더를 열어 주세요</h1>
           <p className="muted">에이전트는 선택한 워크스페이스 안에서 파일을 읽고 수정해요.</p>
@@ -171,7 +182,8 @@ function ConversationView(p: Props & { agentName: (id: string) => string }) {
   const turns = groupTurns(items);
   const lastTurn = turns.at(-1);
   const busy = !!session?.busy;
-  const agentId = session?.agentId ?? p.connecting ?? state.agents[0]?.id ?? null;
+  const usable = installedAgents(state.agents);
+  const agentId = session?.agentId ?? p.connecting ?? usable[0]?.id ?? null;
   const profileId = profileOf(session?.launch);
   const account = agentId ? accountKey(agentId, profileId) : null;
 
@@ -224,7 +236,8 @@ function ConversationView(p: Props & { agentName: (id: string) => string }) {
       </div>
       <Composer
         session={session}
-        agents={state.agents}
+        agents={usable}
+        onAddAgent={p.onOpenAgents}
         agentId={agentId}
         profileId={profileId}
         profiles={state.profiles}
@@ -292,6 +305,15 @@ function AuthBanner(p: Props & { agentName: string }) {
         {terminalMethods.length === 0 && agent?.loginHint && <div className="muted small">{agent.loginHint}</div>}
       </div>
       <div className="auth-actions">
+        {terminalMethods.length === 0 && agent?.canLogin && (
+          <button
+            className="btn"
+            title={agent.loginNote || undefined}
+            onClick={() => api.loginProfile(prompt.agentId, prompt.profileId)}
+          >
+            로그인
+          </button>
+        )}
         {terminalMethods.map((m) => (
           <button
             key={m.id}

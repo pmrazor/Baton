@@ -11,6 +11,7 @@
 //!   - `agent-status`    starting / ready / exited / error
 //!   - `agent-log`       agent stderr, for the debug panel
 //!   - `agent-auth`      the logged-in account of one profile (Claude only)
+//!   - `account-usage`   plan limits read with an agent's `usageArgs` command
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -28,6 +29,8 @@ use crate::profiles::{Profiles, DEFAULT_PROFILE, PROFILE_KEY};
 
 /// ACP's `authRequired` error code.
 const AUTH_REQUIRED: i64 = -32000;
+/// Read an account's plan limits at most this often.
+const USAGE_INTERVAL: Duration = Duration::from_secs(20);
 /// First `npx` launch may download the adapter, so be generous.
 const INIT_TIMEOUT: Duration = Duration::from_secs(180);
 
@@ -81,6 +84,8 @@ pub struct Hub {
     captures: std::sync::Mutex<HashMap<(String, String), Vec<Value>>>,
     permissions: std::sync::Mutex<HashMap<String, PendingPermission>>,
     next_permission: AtomicU64,
+    /// When each (agent, profile)'s plan limits were last read.
+    usage_checked: std::sync::Mutex<HashMap<(String, String), std::time::Instant>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -124,6 +129,22 @@ pub struct AgentInfo {
     /// Supports several accounts (has a `profileEnv`).
     pub multi_account: bool,
     pub login_note: String,
+    /// Has its own login command (`loginArgs`).
+    pub can_login: bool,
+    /// Its program can be found on this computer.
+    pub installed: bool,
+    pub install: Option<InstallInfo>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallInfo {
+    /// What the install button runs in a terminal on this platform.
+    pub command: Option<String>,
+    pub url: String,
+    pub note: String,
+    /// Required programs that are missing (e.g. "npm").
+    pub missing: Vec<String>,
 }
 
 impl Hub {
@@ -144,6 +165,7 @@ impl Hub {
             captures: Default::default(),
             permissions: Default::default(),
             next_permission: AtomicU64::new(1),
+            usage_checked: Default::default(),
         }
     }
 
@@ -170,6 +192,14 @@ impl Hub {
                 launch_options: def.launch_options.clone(),
                 multi_account: def.profile_env.is_some(),
                 login_note: def.login_note.clone(),
+                can_login: !def.login_args.is_empty(),
+                installed: crate::agents::command_exists(&def.command),
+                install: def.install.as_ref().map(|i| InstallInfo {
+                    command: i.command().map(str::to_owned),
+                    url: i.url.clone(),
+                    note: i.note.clone(),
+                    missing: i.requires.iter().filter(|r| !crate::agents::command_exists(r)).cloned().collect(),
+                }),
             });
         }
         out
@@ -234,6 +264,9 @@ impl Hub {
         }
 
         let mut env = def.env.clone();
+        if let Some(path) = crate::shell_env::refreshed_path() {
+            env.insert("PATH".into(), path.to_string_lossy().into_owned());
+        }
         for (_, var, value) in &resolved {
             env.insert(var.clone(), value.clone());
         }
@@ -342,6 +375,15 @@ impl Hub {
             }
         }
         self.remember_options(agent_id, &session);
+        self.refresh_usage(agent_id, launch);
+        // Antigravity names the account's plan when a session opens.
+        if let Some(plan) = session.pointer("/_meta/antigravity/tier/name").and_then(Value::as_str) {
+            let profile_id = self.profile_of(self.def(agent_id)?, launch);
+            let _ = self.app.emit(
+                "agent-auth",
+                json!({ "agentId": agent_id, "profileId": profile_id, "authStatus": { "kind": "subscription", "label": plan } }),
+            );
+        }
         Ok(session)
     }
 
@@ -523,10 +565,58 @@ impl Hub {
             "sessionId": session_id,
             "prompt": [{ "type": "text", "text": text }]
         });
-        rt.conn
-            .request("session/prompt", params)
-            .await
-            .map_err(|e| HubError::with_auth(e, &rt))
+        let result = rt.conn.request("session/prompt", params).await.map_err(|e| HubError::with_auth(e, &rt));
+        let launch = self.homes.lock().unwrap().get(&(agent_id.to_string(), session_id.to_string())).map(|h| h.launch.clone());
+        if let Some(launch) = launch {
+            self.refresh_usage(agent_id, &launch);
+        }
+        result
+    }
+
+    /// Re-read the account's plan limits in the background (agents with
+    /// `usageArgs` only); stored for the orchestrator and sent to the UI.
+    pub fn refresh_usage(&self, agent_id: &str, launch: &Launch) {
+        let Ok(def) = self.def(agent_id) else { return };
+        if def.usage_args.is_empty() {
+            return;
+        }
+        let profile_id = self.profile_of(def, launch);
+        let account = (agent_id.to_string(), profile_id.clone());
+        {
+            let mut checked = self.usage_checked.lock().unwrap();
+            if checked.get(&account).is_some_and(|t| t.elapsed() < USAGE_INTERVAL) {
+                return;
+            }
+            checked.insert(account, std::time::Instant::now());
+        }
+        let mut cmd = std::process::Command::new(&def.command);
+        cmd.args(&def.usage_args).envs(&def.env).stdin(std::process::Stdio::null());
+        if let Some(path) = crate::shell_env::refreshed_path() {
+            cmd.env("PATH", path);
+        }
+        if let Some((var, home)) = self.profile_env(def, &profile_id) {
+            cmd.env(var, home);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(acp::CREATE_NO_WINDOW);
+        }
+        let app = self.app.clone();
+        let agent_id = agent_id.to_string();
+        tokio::spawn(async move {
+            let out = tokio::task::spawn_blocking(move || cmd.output()).await;
+            let Ok(Ok(out)) = out else { return };
+            let Some(usage) = parse_usage_report(&out.stdout) else {
+                use tauri::Manager;
+                let text = String::from_utf8_lossy(&out.stderr);
+                app.state::<Hub>().emit_log(&agent_id, &format!("[hub] 사용량을 읽지 못했어요: {}", text.trim()));
+                return;
+            };
+            use tauri::Manager;
+            app.state::<Hub>().store_quota(&agent_id, &profile_id, usage.clone());
+            let _ = app.emit("account-usage", json!({ "agentId": agent_id, "profileId": profile_id, "usage": usage }));
+        });
     }
 
     pub async fn cancel(&self, agent_id: &str, session_id: &str) -> Result<(), HubError> {
@@ -676,6 +766,15 @@ impl Hub {
     }
 }
 
+/// Antigravity's `agy -p /usage --output-format json`: the limit groups sit in
+/// `command.data` (`{ groups: [{ name, buckets: [{ id, window, remaining_fraction, reset_time }] }] }`).
+fn parse_usage_report(stdout: &[u8]) -> Option<Value> {
+    let report: Value = serde_json::from_slice(stdout).ok()?;
+    let data = report.pointer("/command/data")?;
+    data.get("groups")?.as_array()?;
+    Some(data.clone())
+}
+
 async fn pump_incoming(
     app: AppHandle,
     agent_id: String,
@@ -750,5 +849,22 @@ async fn pump_incoming(
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_antigravity_usage_reports() {
+        let report = br#"{"status":"SUCCESS","response":"Gemini Models\tWeekly...","command":{"name":"usage","data":{
+            "groups":[{"name":"Gemini Models","buckets":[{"id":"gemini-5h","window":"5h","remaining_fraction":0.75,"reset_time":"2026-11-24T12:04:30Z"}]}]}}}"#;
+        let usage = parse_usage_report(report).unwrap();
+        assert_eq!(usage["groups"][0]["buckets"][0]["id"], "gemini-5h");
+
+        assert!(parse_usage_report(b"Not logged in").is_none());
+        assert!(parse_usage_report(br#"{"status":"SUCCESS","response":"hi"}"#).is_none());
+        assert!(parse_usage_report(br#"{"command":{"name":"usage","data":{}}}"#).is_none());
     }
 }

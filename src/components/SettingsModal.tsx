@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { ask } from "@tauri-apps/plugin-dialog";
-import { Check, Copy, LogIn, Pencil, Plus, Trash2, X } from "lucide-react";
+import { Check, Copy, Download, ExternalLink, LogIn, Pencil, Plus, RefreshCw, Trash2, X } from "lucide-react";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { api, toHubError } from "../api";
 import TeamsPanel from "./TeamsPanel";
 import AboutPanel from "./AboutPanel";
@@ -17,12 +18,14 @@ const STATUS_LABEL: Record<AgentStatus, string> = {
 
 interface Props {
   state: State;
+  initialTab?: SettingsTab;
+  onAgentsChanged: (agents: AgentInfo[]) => void;
   onProfilesChanged: () => void;
   onTeamsChanged: () => void;
   onClose: () => void;
 }
 
-type SettingsTab = "accounts" | "teams" | "agents" | "about";
+export type SettingsTab = "accounts" | "teams" | "agents" | "about";
 
 const SETTINGS_TABS: [SettingsTab, string][] = [
   ["accounts", "계정"],
@@ -31,8 +34,15 @@ const SETTINGS_TABS: [SettingsTab, string][] = [
   ["about", "정보"],
 ];
 
-export default function SettingsModal({ state, onProfilesChanged, onTeamsChanged, onClose }: Props) {
-  const [tab, setTab] = useState<SettingsTab>("accounts");
+export default function SettingsModal({
+  state,
+  initialTab,
+  onAgentsChanged,
+  onProfilesChanged,
+  onTeamsChanged,
+  onClose,
+}: Props) {
+  const [tab, setTab] = useState<SettingsTab>(initialTab ?? "accounts");
   const [configPath, setConfigPath] = useState("");
   const [copied, setCopied] = useState(false);
 
@@ -62,7 +72,7 @@ export default function SettingsModal({ state, onProfilesChanged, onTeamsChanged
 
         {tab === "accounts" &&
           state.agents
-            .filter((a) => a.multiAccount)
+            .filter((a) => a.installed && (a.multiAccount || a.canLogin))
             .map((a) => <AgentAccounts key={a.id} agent={a} state={state} onChanged={onProfilesChanged} />)}
 
         {tab === "teams" && <TeamsPanel state={state} onChanged={onTeamsChanged} />}
@@ -71,9 +81,11 @@ export default function SettingsModal({ state, onProfilesChanged, onTeamsChanged
 
         {tab === "agents" && (
           <>
-            <h3>에이전트</h3>
+            <AgentInstall agents={state.agents} onAgentsChanged={onAgentsChanged} />
+
+            <h3>실행 상태</h3>
             <ul className="settings-agents">
-              {state.agents.map((a) => {
+              {state.agents.filter((a) => a.installed).map((a) => {
                 const st = state.status[a.id]?.status ?? (a.running ? "ready" : "idle");
                 return (
                   <li key={a.id}>
@@ -116,6 +128,84 @@ export default function SettingsModal({ state, onProfilesChanged, onTeamsChanged
         )}
       </div>
     </div>
+  );
+}
+
+const NODE_PROGRAMS = ["node", "npm", "npx"];
+
+/** Which agents are on this computer, with a way to install the others. */
+function AgentInstall({ agents, onAgentsChanged }: { agents: AgentInfo[]; onAgentsChanged: (a: AgentInfo[]) => void }) {
+  const [checking, setChecking] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const recheck = () => {
+    setChecking(true);
+    setError(null);
+    api
+      .refreshAgents()
+      .then(onAgentsChanged)
+      .catch((e) => setError(toHubError(e).message))
+      .finally(() => setChecking(false));
+  };
+  const install = (a: AgentInfo) => {
+    setError(null);
+    api.installAgent(a.id).catch((e) => setError(toHubError(e).message));
+  };
+
+  return (
+    <>
+      <div className="settings-head">
+        <h3>에이전트</h3>
+        <button className="btn small-btn" disabled={checking} onClick={recheck} title="설치한 뒤 눌러 주세요">
+          <RefreshCw size={13} /> {checking ? "확인 중…" : "다시 확인"}
+        </button>
+      </div>
+      <ul className="settings-agents">
+        {agents.map((a) => {
+          const missing = a.install?.missing ?? [];
+          const needsNode = missing.some((m) => NODE_PROGRAMS.includes(m));
+          return (
+            <li key={a.id}>
+              <span className={`dot ${a.installed ? "dot-ready" : "dot-idle"}`} />
+              <div className="grow">
+                <div>{a.name}</div>
+                <div className="muted small">
+                  {a.installed
+                    ? "설치됨"
+                    : needsNode
+                      ? "Node.js가 먼저 필요해요"
+                      : missing.length
+                        ? `먼저 필요한 프로그램: ${missing.join(", ")}`
+                        : (a.install?.note || "설치되어 있지 않아요")}
+                </div>
+                {!a.installed && a.install?.command && !missing.length && (
+                  <code className="install-cmd">{a.install.command}</code>
+                )}
+              </div>
+              {!a.installed && a.install && (
+                <div className="install-actions">
+                  {needsNode ? (
+                    <button className="btn small-btn" onClick={() => openUrl("https://nodejs.org/en/download")}>
+                      <ExternalLink size={13} /> Node.js 받기
+                    </button>
+                  ) : a.install.command && !missing.length ? (
+                    <button className="btn btn-primary small-btn" onClick={() => install(a)} title="터미널에서 이 명령을 실행해요">
+                      <Download size={13} /> 설치
+                    </button>
+                  ) : null}
+                  <button className="icon-btn" title="설치 안내 페이지" onClick={() => openUrl(a.install!.url)}>
+                    <ExternalLink size={15} />
+                  </button>
+                </div>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+      <p className="muted small">
+        설치는 터미널에서 공식 설치 명령으로 진행돼요. 끝나면 <b>다시 확인</b>을 눌러 주세요.
+      </p>
+      {error && <p className="error-text small">{error}</p>}
+    </>
   );
 }
 
@@ -168,10 +258,17 @@ function AgentAccounts({ agent, state, onChanged }: { agent: AgentInfo; state: S
     <div className="accounts">
       <div className="accounts-head">
         <b>{agent.name}</b>
-        {!adding && !editing && (
-          <button className="btn small-btn" onClick={() => setAdding(true)}>
-            <Plus size={14} /> 계정 추가
-          </button>
+        {!agent.multiAccount ? (
+          <span className="muted small" title="이 에이전트는 로그인 정보를 한곳에만 저장해서 계정을 나눌 수 없어요">
+            계정 하나만 쓸 수 있어요
+          </span>
+        ) : (
+          !adding &&
+          !editing && (
+            <button className="btn small-btn" onClick={() => setAdding(true)}>
+              <Plus size={14} /> 계정 추가
+            </button>
+          )
         )}
       </div>
       <ul className="account-list">
@@ -188,16 +285,20 @@ function AgentAccounts({ agent, state, onChanged }: { agent: AgentInfo; state: S
                     <div className="muted small">
                       {identity?.account?.email
                         ? `${identity.account.email}${identity.label ? ` · ${identity.label}` : ""}`
-                        : identity?.kind === "none"
+                        : identity?.label
+                          ? `로그인됨 · ${identity.label}`
+                          : identity?.kind === "none"
                           ? "로그인 안 됨"
                           : r.id === DEFAULT_PROFILE
                             ? "기존 로그인 사용"
                             : "로그인 상태는 이 계정으로 대화하면 표시돼요"}
                     </div>
                   </div>
-                  <button className="icon-btn" title="로그인" onClick={() => run(() => api.loginProfile(agent.id, r.id))}>
-                    <LogIn size={15} />
-                  </button>
+                  {agent.canLogin && (
+                    <button className="icon-btn" title="로그인" onClick={() => run(() => api.loginProfile(agent.id, r.id))}>
+                      <LogIn size={15} />
+                    </button>
+                  )}
                   {r.id !== DEFAULT_PROFILE && (
                     <>
                       <button

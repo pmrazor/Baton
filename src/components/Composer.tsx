@@ -28,6 +28,8 @@ interface Props {
   /** Session is being created; input is held until it is ready. */
   connecting: boolean;
   onSwitchAgent: (agentId: string, profileId: string) => void;
+  /** Open settings to install or manage agents. */
+  onAddAgent: () => void;
   /** Restart the draft with a different launch option (only before the first message). */
   onSetLaunch: (optionId: string, value: string) => void;
   onSend: (text: string) => void;
@@ -259,7 +261,18 @@ export default function Composer(p: Props) {
                   ))}
                 </MenuSection>
               );
-            })
+            }).concat(
+              <MenuSection key="__add">
+                <MenuItem
+                  label="에이전트 추가…"
+                  description="다른 에이전트 설치와 관리"
+                  onClick={() => {
+                    close();
+                    p.onAddAgent();
+                  }}
+                />
+              </MenuSection>,
+            )
           }
         </Popover>
 

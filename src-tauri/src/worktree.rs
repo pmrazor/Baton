@@ -77,7 +77,13 @@ fn run_text(cmd: &mut Command) -> Result<String, String> {
 
 /// The repository root containing `dir`, if it is inside a git work tree.
 pub fn repo_root(dir: &Path) -> Option<PathBuf> {
-    run_text(git(dir).args(["rev-parse", "--show-toplevel"])).ok().map(PathBuf::from)
+    run_text(git(dir).args(["rev-parse", "--show-toplevel"])).ok().map(|p| native_path(&p))
+}
+
+/// A path printed by git. Git for Windows prints `C:/Users/…`; keep it in
+/// the native form, since `cmd` reads `/Users` as an option switch.
+fn native_path(text: &str) -> PathBuf {
+    if cfg!(windows) { PathBuf::from(text.replace('/', "\\")) } else { PathBuf::from(text) }
 }
 
 /// Commit the folder's current state (tracked + untracked, minus ignored and
@@ -335,7 +341,7 @@ fn remove_orphan(path: &Path) -> Option<PathBuf> {
         .map(|d| d.to_string())
         .collect();
     let common = run_text(git(path).args(["rev-parse", "--path-format=absolute", "--git-common-dir"])).ok();
-    let repo = common.as_deref().map(Path::new).and_then(Path::parent).map(Path::to_path_buf);
+    let repo = common.as_deref().map(native_path).and_then(|p| p.parent().map(Path::to_path_buf));
     let base = run_text(git(path).args(["rev-parse", "HEAD"])).ok();
     let (Some(repo), Some(base)) = (repo, base) else {
         // Its repository is gone: nothing to save or unregister.
@@ -390,6 +396,8 @@ mod tests {
         let repo = root.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         sh(&repo, &["init", "-q"]);
+        // Keep LF on disk even where git converts by default (GitHub's Windows runners).
+        sh(&repo, &["config", "core.autocrlf", "false"]);
         std::fs::write(repo.join("a.txt"), "one\ntwo\nthree\n").unwrap();
         std::fs::write(repo.join("b.txt"), "keep\n").unwrap();
         sh(&repo, &["add", "."]);
@@ -466,6 +474,7 @@ mod tests {
         let repo = root.join("repo");
         std::fs::create_dir_all(repo.join("node_modules")).unwrap();
         sh(&repo, &["init", "-q"]);
+        sh(&repo, &["config", "core.autocrlf", "false"]);
         std::fs::write(repo.join(".gitignore"), "node_modules/\n").unwrap();
         std::fs::write(repo.join("a.txt"), "one\n").unwrap();
         sh(&repo, &["add", "."]);
@@ -491,8 +500,10 @@ mod tests {
         let saved = cleanup_orphans(&wts, &mine);
 
         assert_eq!(saved.len(), 1, "only the edited task has something to save: {saved:?}");
-        // git reports the real path (macOS temp folders sit behind a /private symlink).
-        assert!(saved[0].starts_with(repo.canonicalize().unwrap().join(".baton/unmerged")), "{saved:?}");
+        // Compare real paths: macOS temp folders sit behind a /private symlink,
+        // and Windows canonical paths carry a \\?\ prefix.
+        let unmerged = repo.join(".baton").join("unmerged").canonicalize().unwrap();
+        assert!(saved[0].canonicalize().unwrap().starts_with(&unmerged), "{saved:?}");
         assert!(!edited.path.exists() && !untouched.path.exists() && !flat.path.exists());
         assert!(!old_run.exists(), "the finished run's folder is gone");
         assert!(live.path.exists(), "a running instance's worktree is left alone");
@@ -532,5 +543,15 @@ mod tests {
         assert!(cleanup_orphans(&wts, &wts.join("mine")).is_empty());
         assert!(!run.exists());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn git_paths_become_native() {
+        let p = native_path("C:/Users/me/repo");
+        if cfg!(windows) {
+            assert_eq!(p.to_str(), Some("C:\\Users\\me\\repo"));
+        } else {
+            assert_eq!(p.to_str(), Some("C:/Users/me/repo"));
+        }
     }
 }

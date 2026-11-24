@@ -111,6 +111,15 @@ pub fn auto_team() -> Team {
                 json!({ "model": r#"["deepseek-account","deepseek-v4-pro"]"# }),
                 "Hard reasoning on a second opinion: tricky bugs, algorithms.",
             ),
+            // Antigravity offers whatever models the Google account has, so
+            // this member runs on the account's default model.
+            member(
+                "antigravity-gemini",
+                "Antigravity · Gemini",
+                "antigravity",
+                json!({}),
+                "Google Gemini: a different model family for a second opinion or review; reading a lot of code at once (very large context).",
+            ),
         ],
     }
 }
@@ -180,7 +189,9 @@ mod tests {
         ids.sort();
         ids.dedup();
         assert_eq!(ids.len(), count, "member ids must be unique");
-        assert!(team.members.iter().all(|m| !m.role.is_empty() && m.config.contains_key("model")));
+        assert!(team.members.iter().all(|m| !m.role.is_empty()));
+        let known: Vec<String> = crate::agents::default_agents().into_iter().map(|a| a.id).collect();
+        assert!(team.members.iter().all(|m| known.contains(&m.agent_id)), "every member uses a built-in agent");
         assert_eq!(team.isolation, "worktree");
     }
 

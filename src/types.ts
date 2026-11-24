@@ -11,7 +11,24 @@ export interface AgentInfo {
   /** Can hold several logged-in accounts (profiles). */
   multiAccount: boolean;
   loginNote: string;
+  /** Has its own login command, run in a terminal. */
+  canLogin: boolean;
+  /** Its program was found on this computer. */
+  installed: boolean;
+  install: InstallInfo | null;
 }
+
+export interface InstallInfo {
+  /** What the install button runs in a terminal; null = install by hand (see url). */
+  command: string | null;
+  url: string;
+  note: string;
+  /** Required programs that are missing, e.g. "npm". */
+  missing: string[];
+}
+
+/** Agents that can be started here, for pickers. */
+export const installedAgents = (agents: AgentInfo[]) => agents.filter((a) => a.installed);
 
 /** A named account of one agent. "default" is the user's existing login. */
 export interface Profile {

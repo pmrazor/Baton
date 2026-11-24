@@ -2,15 +2,16 @@ import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { ask, open } from "@tauri-apps/plugin-dialog";
 import { api, subscribe, toHubError } from "./api";
 import { initialState, reducer, type State } from "./store";
-import { AUTO_TEAM, isTaskActive, profileOf, sessionKey, type Launch, type Session } from "./types";
+import { AUTO_TEAM, installedAgents, isTaskActive, profileOf, sessionKey, type Launch, type Session } from "./types";
 import Sidebar from "./components/Sidebar";
 import ChatView, { TitleBar, type Tab } from "./components/ChatView";
-import SettingsModal from "./components/SettingsModal";
+import SettingsModal, { type SettingsTab } from "./components/SettingsModal";
 import ImportModal, { type Imported } from "./components/ImportModal";
 import UpdateBanner from "./components/UpdateBanner";
 import WindowControls from "./components/WindowControls";
 import { findUpdate } from "./update";
 import type { Update } from "@tauri-apps/plugin-updater";
+import { quotasFromUsageReport } from "./usage";
 
 // Per-user conveniences only; losing them just resets the sidebar.
 const STORE = {
@@ -107,7 +108,7 @@ export default function App() {
   const [state, dispatch] = useReducer(reducer, undefined, init);
   const [connecting, setConnecting] = useState<string | null>(null);
   const [rail, setRail] = useState(() => read<boolean>(STORE.rail, false));
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsTab, setSettingsTab] = useState<SettingsTab | null>(null);
   const [importCwd, setImportCwd] = useState<string | null>(null);
   const [update, setUpdate] = useState<Update | null>(null);
 
@@ -159,6 +160,8 @@ export default function App() {
       onTask: (task) => dispatch({ type: "taskUpdate", task }),
       onTaskSession: (event) => dispatch({ type: "taskSession", event }),
       onTaskBrief: (task, text) => dispatch({ type: "taskBrief", task, text }),
+      onAccountUsage: (agentId, profileId, usage) =>
+        dispatch({ type: "accountUsage", agentId, profileId, quotas: quotasFromUsageReport(usage) }),
     }).then((off) => (disposed ? off() : (unlisten = off)));
 
     return () => {
@@ -214,15 +217,22 @@ export default function App() {
       const ws = workspace ?? state.workspace;
       if (!ws) return addWorkspace();
       if (state.missing.includes(ws)) {
-        const agentForPrompt = agentId ?? state.agents[0]?.id ?? "";
+        const agentForPrompt = agentId ?? installedAgents(state.agents)[0]?.id ?? "";
         dispatch({
           type: "authPrompt",
           prompt: { agentId: agentForPrompt, profileId: "default", message: `작업 폴더를 찾을 수 없어요: ${ws}`, methods: [] },
         });
         return;
       }
-      const agent = agentId ?? read<string | null>(STORE.agent, null) ?? state.agents[0]?.id;
-      if (!agent || creating.current) return;
+      // The last used agent, unless it has since been uninstalled.
+      const usable = installedAgents(state.agents);
+      const remembered = read<string | null>(STORE.agent, null);
+      const agent = agentId ?? usable.find((a) => a.id === remembered)?.id ?? usable[0]?.id;
+      if (!agent) {
+        if (state.agents.length > 0) setSettingsTab("agents");
+        return;
+      }
+      if (creating.current) return;
       // Launch choices (permission, account, …) are remembered per agent for the next new chat.
       const launch = { ...read<Launch>(`${STORE.launch}.${agent}`, {}), ...launchOverride };
 
@@ -349,6 +359,7 @@ export default function App() {
 
   // With a workspace open there is always a chat ready to type into.
   const workspaceMissing = !!state.workspace && state.missing.includes(state.workspace);
+  const hasAgent = installedAgents(state.agents).length > 0;
   useEffect(() => {
     if (
       foldersChecked &&
@@ -356,12 +367,12 @@ export default function App() {
       !workspaceMissing &&
       !active &&
       !connecting &&
-      state.agents.length > 0 &&
+      hasAgent &&
       !state.authPrompt
     ) {
       newChat();
     }
-  }, [foldersChecked, state.workspace, workspaceMissing, active, connecting, state.agents.length, state.authPrompt, newChat]);
+  }, [foldersChecked, state.workspace, workspaceMissing, active, connecting, hasAgent, state.authPrompt, newChat]);
 
   // A conversation restored from disk reconnects to its agent session when opened.
   // One attempt per opening: a failure is recorded and waits for the user's retry.
@@ -537,7 +548,7 @@ export default function App() {
         onCloseSession={deleteSession}
         rail={rail}
         onToggleRail={() => setRail((r) => !r)}
-        onOpenSettings={() => setSettingsOpen(true)}
+        onOpenSettings={() => setSettingsTab("accounts")}
       />
       <ChatView
         state={state}
@@ -566,6 +577,7 @@ export default function App() {
         onSetConfig={setConfig}
         onSetMode={setMode}
         onDismissAuth={() => dispatch({ type: "authPrompt", prompt: null })}
+        onOpenAgents={() => setSettingsTab("agents")}
         agentMode={agentMode}
         teamId={teamId}
         onChangeMode={changeMode}
@@ -602,12 +614,14 @@ export default function App() {
           onClose={() => setImportCwd(null)}
         />
       )}
-      {settingsOpen && (
+      {settingsTab && (
         <SettingsModal
           state={state}
+          initialTab={settingsTab}
+          onAgentsChanged={(agents) => dispatch({ type: "agents", agents })}
           onProfilesChanged={() => api.listProfiles().then((profiles) => dispatch({ type: "profiles", profiles }))}
           onTeamsChanged={() => api.listTeams().then((teams) => dispatch({ type: "teams", teams }))}
-          onClose={() => setSettingsOpen(false)}
+          onClose={() => setSettingsTab(null)}
         />
       )}
     </div>
