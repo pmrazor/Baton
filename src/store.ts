@@ -217,10 +217,12 @@ export function reducer(state: State, action: Action): State {
       };
     }
     case "activate": {
-      const cwd = state.sessions.find((s) => s.key === action.key)?.cwd;
+      const target = state.sessions.find((s) => s.key === action.key);
+      // A task's chat runs in a worktree copy; its workspace is its lead's folder.
+      const home = target?.parent ? state.sessions.find((s) => s.key === target.parent!.key)?.cwd : target?.cwd;
       // Leaving an unused draft discards it.
       const sessions = state.sessions.filter((s) => !s.draft || s.key === action.key);
-      return { ...state, sessions, activeKey: action.key, workspace: cwd ?? state.workspace };
+      return { ...state, sessions, activeKey: action.key, workspace: home ?? state.workspace };
     }
     case "restore": {
       const known = new Set(state.sessions.map((s) => s.key));

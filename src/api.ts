@@ -51,6 +51,12 @@ export interface FileContent {
   mtime: number;
 }
 
+export interface GitDiffTexts {
+  original: string | null;
+  modified: string | null;
+  binary: boolean;
+}
+
 export type FsErrorKind =
   | "invalid_path"
   | "not_found"
@@ -71,6 +77,64 @@ export function toFsError(e: unknown): FsError {
     return { kind: String(err.kind) as FsErrorKind, message: String(err.message) };
   }
   return { kind: "io", message: String(e) };
+}
+
+/** One changed file in `git status`. Paths are relative to the repository root, `/`-separated. */
+export interface GitFileStatus {
+  path: string;
+  /** The old path of a staged rename. */
+  origPath?: string;
+  /** Staged state: M, A, D, R, C, T, U, or "" when unchanged. */
+  index: string;
+  /** Working tree state: M, D, T, A, U, ?, or "" when unchanged. */
+  worktree: string;
+  untracked: boolean;
+  conflicted: boolean;
+}
+
+export interface GitStatus {
+  repo: boolean;
+  /** The repository's top folder; empty when `repo` is false. */
+  repoRoot: string;
+  /** The requested folder relative to `repoRoot` (`sub/` or ""). */
+  prefix: string;
+  /** The current branch, or the short commit when detached. */
+  branch: string;
+  detached: boolean;
+  upstream: string | null;
+  ahead: number;
+  behind: number;
+  hasCommits: boolean;
+  /** Full HEAD commit hash, or "" when the repository has no commits yet. */
+  head: string;
+  files: GitFileStatus[];
+}
+
+export interface GitBranch {
+  /** `main` locally, `origin/main` for a remote branch. */
+  name: string;
+  current: boolean;
+  remote: boolean;
+  upstream: string | null;
+}
+
+export interface GitCommit {
+  hash: string;
+  short: string;
+  parents: string[];
+  author: string;
+  email: string;
+  /** Author time in Unix seconds. */
+  time: number;
+  subject: string;
+  refs: string[];
+}
+
+export interface GitCommitFile {
+  path: string;
+  /** Single-letter git status: A, M, D, R, C, T… */
+  status: string;
+  origPath?: string;
 }
 
 export const api = {
@@ -161,6 +225,31 @@ export const api = {
   fsRename: (root: string, from: string, to: string) => invoke<void>("fs_rename", { root, from, to }),
   fsCopy: (root: string, from: string, toDir: string) => invoke<string>("fs_copy", { root, from, toDir }),
   fsTrash: (root: string, path: string) => invoke<void>("fs_trash", { root, path }),
+  /** Git commands take any folder inside the repository; `paths` are repository-relative. */
+  gitStatus: (root: string) => invoke<GitStatus>("git_status", { root }),
+  gitStage: (root: string, paths: string[]) => invoke<void>("git_stage", { root, paths }),
+  gitUnstage: (root: string, paths: string[]) => invoke<void>("git_unstage", { root, paths }),
+  /** Tracked files return to their staged content; untracked files go to the trash. */
+  gitDiscard: (root: string, paths: string[]) => invoke<void>("git_discard", { root, paths }),
+  /** Returns the new commit's short hash. */
+  gitCommit: (root: string, message: string, amend: boolean) =>
+    invoke<string>("git_commit", { root, message, amend }),
+  gitBranches: (root: string) => invoke<GitBranch[]>("git_branches", { root }),
+  gitCheckout: (root: string, branch: string, create: boolean) =>
+    invoke<void>("git_checkout", { root, branch, create }),
+  gitFetch: (root: string) => invoke<void>("git_fetch", { root }),
+  gitPull: (root: string) => invoke<void>("git_pull", { root }),
+  gitPush: (root: string) => invoke<void>("git_push", { root }),
+  gitInit: (root: string) => invoke<void>("git_init", { root }),
+  gitLog: (root: string, skip = 0, limit = 200) => invoke<GitCommit[]>("git_log", { root, skip, limit }),
+  gitCommitFiles: (root: string, hash: string) => invoke<GitCommitFile[]>("git_commit_files", { root, hash }),
+  gitDiffCommitTexts: (root: string, hash: string, path: string, origPath?: string) =>
+    invoke<GitDiffTexts>("git_diff_commit_texts", { root, hash, path, origPath }),
+  gitBranchAt: (root: string, name: string, hash: string) =>
+    invoke<void>("git_branch_at", { root, name, hash }),
+  gitRefsStamp: (root: string) => invoke<string>("git_refs_stamp", { root }),
+  gitDiffTexts: (root: string, path: string, staged: boolean) =>
+    invoke<GitDiffTexts>("git_diff_texts", { root, path, staged }),
 };
 
 /** Terminal output (UTF-8 text) and shell exits, for every terminal. `gone`:

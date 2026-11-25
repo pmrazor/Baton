@@ -1,5 +1,5 @@
-import { lazy, Suspense, useEffect, useLayoutEffect, useRef, type ReactNode } from "react";
-import { Download, FolderPlus } from "lucide-react";
+import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { ArrowDown, Download, FolderPlus } from "lucide-react";
 import { api } from "../api";
 import { accountLimit, leadLimit } from "../handoff";
 import type { State } from "../store";
@@ -267,9 +267,20 @@ export function ConversationView(p: ChatViewProps & { agentName: (id: string) =>
     if (el && stickToBottom.current) el.scrollTop = el.scrollHeight;
   };
 
+  // Scrolled up away from the end: offer a button back down.
+  const [awayFromBottom, setAwayFromBottom] = useState(false);
+  const jumpToBottom = () => {
+    const el = listRef.current;
+    if (!el) return;
+    stickToBottom.current = true;
+    setAwayFromBottom(false);
+    el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+  };
+
   // Opening a chat (or coming back from another tab) shows its end.
   useLayoutEffect(() => {
     stickToBottom.current = true;
+    setAwayFromBottom(false);
     pinToBottom();
   }, [session?.key]);
 
@@ -293,6 +304,7 @@ export function ConversationView(p: ChatViewProps & { agentName: (id: string) =>
         onScroll={(e) => {
           const el = e.currentTarget;
           stickToBottom.current = isNearBottom(el.scrollTop, el.scrollHeight, el.clientHeight);
+          setAwayFromBottom(!stickToBottom.current);
         }}
       >
         <div className="thread" ref={threadRef}>
@@ -327,6 +339,13 @@ export function ConversationView(p: ChatViewProps & { agentName: (id: string) =>
           )}
         </div>
       </div>
+      {awayFromBottom && (
+        <div className="jump-anchor">
+          <button className="jump-bottom" title="맨 아래로" aria-label="맨 아래로" onClick={jumpToBottom}>
+            <ArrowDown size={16} />
+          </button>
+        </div>
+      )}
       <Composer
         session={session}
         agents={usable}

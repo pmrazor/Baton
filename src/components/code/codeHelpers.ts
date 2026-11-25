@@ -66,6 +66,66 @@ export function fileName(path: string): string {
   return idx >= 0 ? clean.slice(idx + 1) : clean;
 }
 
+export const DIFF_STAGED_PREFIX = "diff:staged:";
+export const DIFF_WORKTREE_PREFIX = "diff:worktree:";
+export const DIFF_COMMIT_PREFIX = "diff:commit:";
+
+/** Abbreviate a git commit hash for tab ids and labels. */
+export function shortHash(hash: string): string {
+  return hash.trim().slice(0, 7);
+}
+
+/** Non-colliding tab id for a diff tab (`diff:staged:<path>` or `diff:worktree:<path>`). */
+export function diffTabId(path: string, staged: boolean): string {
+  const rel = normalizeRelativePath(path);
+  return `${staged ? DIFF_STAGED_PREFIX : DIFF_WORKTREE_PREFIX}${rel}`;
+}
+
+/** Non-colliding tab id for a commit diff tab (`diff:commit:<short>:<path>`). */
+export function commitDiffTabId(hash: string, path: string): string {
+  const rel = normalizeRelativePath(path);
+  return `${DIFF_COMMIT_PREFIX}${shortHash(hash)}:${rel}`;
+}
+
+/** Parse a diff tab id back into its normalized relative path and staged/commit info, or null for normal tabs. */
+export function parseDiffTabId(id: string): { path: string; staged: boolean; commit?: string } | null {
+  if (id.startsWith(DIFF_COMMIT_PREFIX)) {
+    const rest = id.slice(DIFF_COMMIT_PREFIX.length);
+    const sep = rest.indexOf(":");
+    if (sep > 0) {
+      return {
+        path: normalizeRelativePath(rest.slice(sep + 1)),
+        staged: true,
+        commit: rest.slice(0, sep),
+      };
+    }
+    return null;
+  }
+  if (id.startsWith(DIFF_STAGED_PREFIX)) {
+    return { path: normalizeRelativePath(id.slice(DIFF_STAGED_PREFIX.length)), staged: true };
+  }
+  if (id.startsWith(DIFF_WORKTREE_PREFIX)) {
+    return { path: normalizeRelativePath(id.slice(DIFF_WORKTREE_PREFIX.length)), staged: false };
+  }
+  return null;
+}
+
+/** Normalize either a normal tab id (relative path) or a diff tab id. */
+export function normalizeTabId(id: string): string {
+  const parsed = parseDiffTabId(id);
+  if (parsed) {
+    return parsed.commit ? commitDiffTabId(parsed.commit, parsed.path) : diffTabId(parsed.path, parsed.staged);
+  }
+  return normalizeRelativePath(id);
+}
+
+/** Display label for a diff tab. */
+export function diffTabLabel(path: string, staged: boolean, commitHash?: string): string {
+  const name = fileName(path);
+  if (commitHash) return `${name} (${shortHash(commitHash)})`;
+  return staged ? `${name} (스테이징됨)` : `${name} (변경 사항)`;
+}
+
 /** Return `absPath` relative to `root` (`/`-separated), or null if outside `root`. */
 export function relativeToRoot(root: string, absPath: string): string | null {
   const normRoot = normalizeAbsolutePath(root);
@@ -150,6 +210,52 @@ export function nextActiveAfterClose(
   if (rest.length === 0) return null;
   if (idx < 0) return rest[0];
   return rest[Math.min(idx, rest.length - 1)];
+}
+
+export type BulkCloseAction = "others" | "left" | "right" | "saved" | "all";
+
+/** Pick the ordered tab ids to close for a bulk-close action. */
+export function tabIdsToClose(
+  orderedIds: readonly string[],
+  targetId: string,
+  action: BulkCloseAction,
+  dirtyIds: ReadonlySet<string> = new Set(),
+): string[] {
+  switch (action) {
+    case "all":
+      return [...orderedIds];
+    case "saved":
+      return orderedIds.filter((id) => !dirtyIds.has(id));
+    case "others":
+      return orderedIds.includes(targetId)
+        ? orderedIds.filter((id) => id !== targetId)
+        : [];
+    case "left": {
+      const idx = orderedIds.indexOf(targetId);
+      return idx > 0 ? orderedIds.slice(0, idx) : [];
+    }
+    case "right": {
+      const idx = orderedIds.indexOf(targetId);
+      return idx >= 0 && idx < orderedIds.length - 1 ? orderedIds.slice(idx + 1) : [];
+    }
+  }
+}
+
+/** Pick the next active tab after closing several tabs at once, reusing `nextActiveAfterClose`. */
+export function nextActiveAfterBulkClose(
+  ids: readonly string[],
+  active: string | null,
+  closing: Iterable<string>,
+): string | null {
+  const closingSet = new Set(closing);
+  let remaining = [...ids];
+  let current = active;
+  for (const id of ids) {
+    if (!closingSet.has(id)) continue;
+    current = nextActiveAfterClose(remaining, current, id);
+    remaining = remaining.filter((item) => item !== id);
+  }
+  return current;
 }
 
 export interface SelectedTreeEntry {
@@ -443,6 +549,74 @@ export function buildTreeMenuSections(opts: {
     {
       id: "system",
       items: systemItems,
+    },
+  ];
+}
+
+export type EditorTabMenuActionId =
+  | "close"
+  | "closeOthers"
+  | "closeLeft"
+  | "closeRight"
+  | "closeSaved"
+  | "closeAll"
+  | "copyPath"
+  | "copyRelativePath"
+  | "revealInTree"
+  | "openFile";
+
+export interface EditorTabMenuItem {
+  id: EditorTabMenuActionId;
+  label: string;
+  shortcut?: string;
+  disabled?: boolean;
+  danger?: boolean;
+}
+
+export interface EditorTabMenuSection {
+  id: string;
+  items: EditorTabMenuItem[];
+}
+
+/** Build the VS Code-style context menu sections for an editor tab (normal or diff). */
+export function buildEditorTabMenuSections(opts: {
+  orderedIds: readonly string[];
+  targetId: string;
+  dirtyIds: ReadonlySet<string>;
+  isDiff: boolean;
+  platform: Platform;
+}): EditorTabMenuSection[] {
+  const { orderedIds, targetId, dirtyIds, isDiff, platform } = opts;
+  const mod = platform === "mac" ? "⌘" : "Ctrl+";
+  const hasOthers = tabIdsToClose(orderedIds, targetId, "others", dirtyIds).length > 0;
+  const hasLeft = tabIdsToClose(orderedIds, targetId, "left", dirtyIds).length > 0;
+  const hasRight = tabIdsToClose(orderedIds, targetId, "right", dirtyIds).length > 0;
+  const hasSaved = tabIdsToClose(orderedIds, targetId, "saved", dirtyIds).length > 0;
+
+  const fileItems: EditorTabMenuItem[] = [
+    { id: "copyPath", label: "경로 복사" },
+    { id: "copyRelativePath", label: "상대 경로 복사" },
+    { id: "revealInTree", label: "파일 트리에서 보기" },
+  ];
+  if (isDiff) {
+    fileItems.push({ id: "openFile", label: "파일 열기" });
+  }
+
+  return [
+    {
+      id: "close",
+      items: [
+        { id: "close", label: "닫기", shortcut: `${mod}W` },
+        { id: "closeOthers", label: "다른 탭 모두 닫기", disabled: !hasOthers },
+        { id: "closeLeft", label: "왼쪽 탭 닫기", disabled: !hasLeft },
+        { id: "closeRight", label: "오른쪽 탭 닫기", disabled: !hasRight },
+        { id: "closeSaved", label: "저장된 탭 닫기", disabled: !hasSaved },
+        { id: "closeAll", label: "모두 닫기", disabled: orderedIds.length === 0 },
+      ],
+    },
+    {
+      id: "file",
+      items: fileItems,
     },
   ];
 }

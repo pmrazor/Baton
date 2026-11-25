@@ -14,7 +14,7 @@ use std::time::UNIX_EPOCH;
 use serde::Serialize;
 
 /// Maximum text file size the editor will open (2 MiB).
-const MAX_READ_BYTES: u64 = 2 * 1024 * 1024;
+pub(crate) const MAX_READ_BYTES: u64 = 2 * 1024 * 1024;
 
 /// Folders always hidden in the tree, even outside a git repository.
 const ALWAYS_HIDDEN: &[&str] = &[".git", "node_modules", "target", ".baton"];
@@ -45,11 +45,11 @@ pub struct FsError {
 }
 
 impl FsError {
-    fn invalid_path(message: impl Into<String>) -> Self {
+    pub(crate) fn invalid_path(message: impl Into<String>) -> Self {
         Self { kind: "invalid_path", message: message.into() }
     }
 
-    fn not_found(message: impl Into<String>) -> Self {
+    pub(crate) fn not_found(message: impl Into<String>) -> Self {
         Self { kind: "not_found", message: message.into() }
     }
 
@@ -69,7 +69,7 @@ impl FsError {
         Self { kind: "conflict", message: message.into() }
     }
 
-    fn io(message: impl Into<String>) -> Self {
+    pub(crate) fn io(message: impl Into<String>) -> Self {
         Self { kind: "io", message: message.into() }
     }
 }
@@ -85,7 +85,7 @@ fn hide_window(cmd: &mut Command) {
     let _ = cmd;
 }
 
-fn canonical_root(root: &str) -> Result<PathBuf, FsError> {
+pub(crate) fn canonical_root(root: &str) -> Result<PathBuf, FsError> {
     let p = Path::new(root);
     if !p.is_dir() {
         return Err(FsError::not_found("작업 폴더를 찾을 수 없어요."));
@@ -94,7 +94,7 @@ fn canonical_root(root: &str) -> Result<PathBuf, FsError> {
 }
 
 /// Validate a path relative to `root` and split it into safe path segments.
-fn parse_rel_segments(rel: &str, allow_empty: bool) -> Result<Vec<String>, FsError> {
+pub(crate) fn parse_rel_segments(rel: &str, allow_empty: bool) -> Result<Vec<String>, FsError> {
     if rel.contains('\0') {
         return Err(FsError::invalid_path("올바르지 않은 경로예요."));
     }
@@ -130,7 +130,7 @@ fn parse_rel_segments(rel: &str, allow_empty: bool) -> Result<Vec<String>, FsErr
     Ok(segments)
 }
 
-fn join_segments(root: &Path, segments: &[String]) -> PathBuf {
+pub(crate) fn join_segments(root: &Path, segments: &[String]) -> PathBuf {
     let mut path = root.to_path_buf();
     for seg in segments {
         path.push(seg);

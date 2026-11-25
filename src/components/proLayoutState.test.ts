@@ -60,8 +60,14 @@ describe("sub-sidebar view toggling", () => {
     expect(toggleSubSidebar(null, "files")).toBe("files");
   });
 
-  it("exposes 파일 in the view registry", () => {
-    expect(PRO_VIEWS.map((v) => v.id)).toContain("files");
+  it("exposes 파일 and 깃 in the view registry", () => {
+    expect(PRO_VIEWS.map((v) => v.id)).toEqual(["files", "git"]);
+    expect(PRO_VIEWS.find((v) => v.id === "git")?.label).toBe("깃");
+  });
+
+  it("switches between views without closing the sub-sidebar", () => {
+    expect(toggleProView("files", "git")).toBe("git");
+    expect(toggleProView("git", "git")).toBeNull();
   });
 });
 

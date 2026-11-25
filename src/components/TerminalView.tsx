@@ -1,10 +1,23 @@
-import { useEffect, useRef, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Plus, X } from "lucide-react";
+import { ask } from "@tauri-apps/plugin-dialog";
 import { Terminal, type ITheme } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { api, subscribeTerminals } from "../api";
-import { nextTabNumber, tabAfterClose, terminalId, terminalNumber } from "./terminalTabs";
+import ContextMenu from "./ContextMenu";
+import {
+  buildTerminalTabMenuSections,
+  nextTabNumber,
+  tabAfterBulkClose,
+  tabAfterClose,
+  terminalId,
+  terminalLabel,
+  terminalNumber,
+  terminalTabsToClose,
+  type TerminalBulkCloseAction,
+  type TerminalTabMenuActionId,
+} from "./terminalTabs";
 
 /** One shell per sub-tab, kept here rather than in React state so the shell and
  *  its scrollback outlive the tab and the chat: a view only borrows `el`. The id
@@ -12,8 +25,10 @@ import { nextTabNumber, tabAfterClose, terminalId, terminalNumber } from "./term
 interface Entry {
   id: string;
   cwd: string;
-  /** The "터미널 n" label. */
+  /** The default "터미널 n" number. */
   n: number;
+  /** Custom user-assigned label, or null to fall back to "터미널 n". */
+  name: string | null;
   term: Terminal;
   fit: FitAddon;
   /** The terminal's element, moved into whichever view shows this tab. */
@@ -31,6 +46,7 @@ interface Entry {
 interface TabView {
   id: string;
   n: number;
+  name: string | null;
   running: boolean;
 }
 
@@ -67,7 +83,10 @@ const fontsReady = Promise.all([
 
 function changed(f: Folder | undefined) {
   if (!f) return;
-  f.view = { tabs: f.tabs.map((e) => ({ id: e.id, n: e.n, running: e.running })), active: f.active };
+  f.view = {
+    tabs: f.tabs.map((e) => ({ id: e.id, n: e.n, name: e.name, running: e.running })),
+    active: f.active,
+  };
   subscribers.forEach((fn) => fn());
 }
 
@@ -192,6 +211,7 @@ function addEntry(f: Folder, cwd: string, n: number): Entry {
     id,
     cwd,
     n,
+    name: null,
     term,
     fit,
     el,
@@ -290,6 +310,53 @@ function closeTab(cwd: string, id: string) {
   changed(f);
 }
 
+/** End several tabs' shells at once and select the next active tab atomically. */
+function closeTabs(cwd: string, ids: readonly string[]) {
+  const f = folders.get(cwd);
+  if (!f || ids.length === 0) return;
+  const closingSet = new Set(ids);
+  const doomed = f.tabs.filter((t) => closingSet.has(t.id));
+  if (doomed.length === 0) return;
+  f.active = tabAfterBulkClose(
+    f.tabs.map((t) => t.id),
+    f.active,
+    doomed.map((t) => t.id),
+  );
+  f.tabs = f.tabs.filter((t) => !closingSet.has(t.id));
+  if (f.tabs.length === 0) f.last = 0;
+  for (const e of doomed) {
+    entries.delete(e.id);
+    e.closed = true;
+    if (e.running) {
+      ending.add(e.id);
+      void api.terminalClose(e.id).catch(() => undefined);
+    }
+    e.el.remove();
+    e.term.dispose();
+  }
+  changed(f);
+}
+
+/** Set or clear a tab's custom label in the module registry. */
+function renameTab(cwd: string, id: string, rawName: string) {
+  const f = folders.get(cwd);
+  const e = entries.get(id);
+  if (!f || !e) return;
+  const trimmed = rawName.trim();
+  const next = trimmed || null;
+  if (e.name === next) return;
+  e.name = next;
+  changed(f);
+}
+
+/** Clear a tab's xterm scrollback buffer. */
+function clearTab(id: string) {
+  const e = entries.get(id);
+  if (!e) return;
+  if (e.opened) e.term.clear();
+  focus(folders.get(e.cwd)?.active);
+}
+
 const focus = (id: string | null | undefined) => id && entries.get(id)?.term.focus();
 
 /** The terminal of one tab, attached while it's the active one. */
@@ -331,8 +398,36 @@ function Screen({ id }: { id: string }) {
 
 function TabStrip({ cwd, view }: { cwd: string; view: FolderView | null }) {
   const stripRef = useRef<HTMLDivElement>(null);
+  const renameInputRef = useRef<HTMLInputElement>(null);
+  const ignoreRenameBlurRef = useRef(false);
+  const [menu, setMenu] = useState<{ x: number; y: number; tabId: string } | null>(null);
+  const [renaming, setRenaming] = useState<{ id: string; value: string } | null>(null);
   const active = view?.active;
   const count = view?.tabs.length;
+
+  useEffect(() => {
+    setMenu(null);
+    setRenaming(null);
+  }, [cwd]);
+
+  // Cancel rename if the target tab was removed externally.
+  const renamingId = renaming?.id ?? null;
+  useEffect(() => {
+    if (renamingId && !view?.tabs.some((t) => t.id === renamingId)) {
+      setRenaming(null);
+    }
+  }, [renamingId, view?.tabs]);
+
+  // Focus and select all when inline rename begins.
+  useEffect(() => {
+    if (!renamingId) return;
+    const input = renameInputRef.current;
+    if (input) {
+      input.focus();
+      input.select();
+      input.scrollIntoView({ block: "nearest", inline: "nearest" });
+    }
+  }, [renamingId]);
 
   // Keep the active tab in sight.
   useEffect(() => {
@@ -342,9 +437,84 @@ function TabStrip({ cwd, view }: { cwd: string; view: FolderView | null }) {
   }, [active, count]);
 
   const close = (id: string) => {
+    if (renaming?.id === id) setRenaming(null);
     closeTab(cwd, id);
     // Closing another tab leaves the active one as it was; keys go back to it.
     focus(folders.get(cwd)?.active);
+  };
+
+  const handleBulkClose = async (targetId: string, action: TerminalBulkCloseAction) => {
+    const f = folders.get(cwd);
+    if (!f) return;
+    const idsToClose = terminalTabsToClose(
+      f.tabs.map((t) => t.id),
+      targetId,
+      action,
+    );
+    if (idsToClose.length === 0) return;
+
+    const runningCount = idsToClose.filter((id) => entries.get(id)?.running).length;
+    if (runningCount > 1) {
+      const ok = await ask(`실행 중인 터미널 ${runningCount}개를 닫을까요?`, {
+        title: "터미널 닫기",
+        kind: "warning",
+        okLabel: "닫기",
+        cancelLabel: "취소",
+      });
+      if (!ok) return;
+    }
+
+    if (renaming && idsToClose.includes(renaming.id)) {
+      setRenaming(null);
+    }
+    closeTabs(cwd, idsToClose);
+    focus(folders.get(cwd)?.active);
+  };
+
+  const commitRename = (id: string, value: string, restoreFocus: boolean) => {
+    renameTab(cwd, id, value);
+    setRenaming(null);
+    if (restoreFocus) focus(folders.get(cwd)?.active);
+  };
+
+  const menuTab = menu ? (view?.tabs.find((t) => t.id === menu.tabId) ?? null) : null;
+
+  const menuSections = useMemo(() => {
+    if (!menuTab || !view) return [];
+    return buildTerminalTabMenuSections(
+      view.tabs.map((t) => t.id),
+      menuTab.id,
+    );
+  }, [menuTab, view]);
+
+  const handleMenuSelect = (action: TerminalTabMenuActionId) => {
+    if (!menu) return;
+    const tab = folders.get(cwd)?.tabs.find((t) => t.id === menu.tabId);
+    if (!tab) return;
+    switch (action) {
+      case "close":
+        close(tab.id);
+        return;
+      case "closeOthers":
+        void handleBulkClose(tab.id, "others");
+        return;
+      case "closeLeft":
+        void handleBulkClose(tab.id, "left");
+        return;
+      case "closeRight":
+        void handleBulkClose(tab.id, "right");
+        return;
+      case "closeAll":
+        void handleBulkClose(tab.id, "all");
+        return;
+      case "rename":
+        ignoreRenameBlurRef.current = false;
+        setRenaming({ id: tab.id, value: terminalLabel(tab.n, tab.name) });
+        return;
+      case "clear":
+        clearTab(tab.id);
+        return;
+    }
   };
 
   return (
@@ -358,32 +528,97 @@ function TabStrip({ cwd, view }: { cwd: string; view: FolderView | null }) {
         if (Math.abs(ev.deltaY) > Math.abs(ev.deltaX)) ev.currentTarget.scrollLeft += ev.deltaY;
       }}
     >
-      {view?.tabs.map((t) => (
-        <div
-          key={t.id}
-          className={`terminal-tab${t.id === active ? " active" : ""}${t.running ? "" : " ended"}`}
-          title={t.running ? undefined : "셸이 종료됐어요"}
-          // Middle-click closes, without starting autoscroll.
-          onMouseDown={(ev) => ev.button === 1 && ev.preventDefault()}
-          onAuxClick={(ev) => ev.button === 1 && close(t.id)}
-        >
-          <button
-            className="terminal-tab-label"
-            role="tab"
-            aria-selected={t.id === active}
-            onClick={() => (t.id === active ? focus(t.id) : selectTab(cwd, t.id))}
+      {view?.tabs.map((t) => {
+        const label = terminalLabel(t.n, t.name);
+        const isRenamingThis = renaming?.id === t.id;
+        return (
+          <div
+            key={t.id}
+            className={`terminal-tab${t.id === active ? " active" : ""}${t.running ? "" : " ended"}`}
+            title={t.running ? undefined : "셸이 종료됐어요"}
+            // Middle-click closes, without starting autoscroll.
+            onMouseDown={(ev) => !isRenamingThis && ev.button === 1 && ev.preventDefault()}
+            onAuxClick={(ev) => !isRenamingThis && ev.button === 1 && close(t.id)}
+            onContextMenu={(ev) => {
+              if ((ev.target as HTMLElement | null)?.closest("input")) return;
+              ev.preventDefault();
+              ev.stopPropagation();
+              setMenu({ x: ev.clientX, y: ev.clientY, tabId: t.id });
+            }}
           >
-            터미널 {t.n}
-          </button>
-          <button className="terminal-tab-close" aria-label={`터미널 ${t.n} 닫기`} title="닫기" onClick={() => close(t.id)}>
-            <X size={12} />
-          </button>
-        </div>
-      ))}
+            {isRenamingThis ? (
+              <input
+                ref={renameInputRef}
+                type="text"
+                className="terminal-tab-input"
+                aria-label="터미널 이름 바꾸기"
+                value={renaming.value}
+                spellCheck={false}
+                autoComplete="off"
+                onChange={(ev) => {
+                  const value = ev.target.value;
+                  setRenaming((cur) => (cur ? { ...cur, value } : null));
+                }}
+                onKeyDown={(ev) => {
+                  if (ev.key === "Escape") {
+                    ev.preventDefault();
+                    ev.stopPropagation();
+                    ignoreRenameBlurRef.current = true;
+                    setRenaming(null);
+                    focus(folders.get(cwd)?.active);
+                    return;
+                  }
+                  if (ev.key === "Enter") {
+                    if (ev.nativeEvent.isComposing || ev.keyCode === 229) return;
+                    ev.preventDefault();
+                    ev.stopPropagation();
+                    ignoreRenameBlurRef.current = true;
+                    commitRename(t.id, renaming.value, true);
+                  }
+                }}
+                onBlur={() => {
+                  if (ignoreRenameBlurRef.current) {
+                    ignoreRenameBlurRef.current = false;
+                    return;
+                  }
+                  commitRename(t.id, renaming.value, false);
+                }}
+              />
+            ) : (
+              <button
+                className="terminal-tab-label"
+                role="tab"
+                aria-selected={t.id === active}
+                onClick={() => (t.id === active ? focus(t.id) : selectTab(cwd, t.id))}
+              >
+                {label}
+              </button>
+            )}
+            <button
+              className="terminal-tab-close"
+              aria-label={`${label} 닫기`}
+              title="닫기"
+              onClick={() => close(t.id)}
+            >
+              <X size={12} />
+            </button>
+          </div>
+        );
+      })}
       {view && (
         <button className="terminal-tab-add" aria-label="새 터미널" title="새 터미널" onClick={() => newTab(cwd)}>
           <Plus size={14} />
         </button>
+      )}
+      {menu && menuTab && (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          sections={menuSections}
+          ariaLabel="터미널 탭 메뉴"
+          onSelect={handleMenuSelect}
+          onClose={() => setMenu(null)}
+        />
       )}
     </div>
   );

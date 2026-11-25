@@ -2,6 +2,8 @@ pub mod acp;
 pub mod agents;
 mod attachments;
 mod files;
+mod git;
+mod gitdiff;
 mod history;
 mod hub;
 mod legacy;
@@ -531,6 +533,23 @@ pub fn run() {
             files::fs_rename,
             files::fs_copy,
             files::fs_trash,
+            git::git_status,
+            git::git_stage,
+            git::git_unstage,
+            git::git_discard,
+            git::git_commit,
+            git::git_branches,
+            git::git_checkout,
+            git::git_fetch,
+            git::git_pull,
+            git::git_push,
+            git::git_init,
+            git::git_log,
+            git::git_commit_files,
+            git::git_diff_commit_texts,
+            git::git_branch_at,
+            git::git_refs_stamp,
+            gitdiff::git_diff_texts,
         ])
         .build(tauri::generate_context!())
         .expect("error while running Baton")

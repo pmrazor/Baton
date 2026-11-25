@@ -2,23 +2,31 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { attachToComposer, onAttach } from "../../composerBus";
 import {
   ancestorDirs,
+  buildEditorTabMenuSections,
   buildTreeMenuSections,
   clampMenuPosition,
+  commitDiffTabId,
   detectPlatform,
+  diffTabId,
+  diffTabLabel,
   fileName,
   findContainingRoot,
   joinPath,
   joinRelativePath,
   languageForPath,
+  nextActiveAfterBulkClose,
   nextActiveAfterClose,
   nextCopyName,
+  normalizeTabId,
   parentDir,
+  parseDiffTabId,
   pasteTargetFolder,
   pathMatchesPrefix,
   relativeToRoot,
   renameSelectionEnd,
   revealLabelForPlatform,
   rewritePathPrefix,
+  tabIdsToClose,
   targetFolderForSelection,
   validateNewEntryName,
   validateRenameName,
@@ -26,16 +34,22 @@ import {
 import {
   activateTab,
   clearJump,
+  clearReveal,
   closeTab,
+  closeTabs,
   getRootEditorView,
   handleDeletedPath,
+  onRevealInTree,
   onTabClosed,
   onTabRenamed,
   openAbsolutePath,
+  openCommitDiff,
+  openDiff,
   openFile,
   registerRoot,
   renamePath,
   resetEditorStore,
+  revealInTree,
   setTabState,
   subscribeEditor,
 } from "./editorStore";
@@ -271,7 +285,9 @@ describe("editorStore", () => {
 
     const tab = getRootEditorView("/repo").tabs[0];
     expect(tab).toEqual({
+      id: "x.ts",
       path: "x.ts",
+      kind: "file",
       dirty: true,
       deleted: false,
       diskChanged: false,
@@ -342,6 +358,157 @@ describe("editorStore", () => {
     expect(closed).toEqual([["/repo", "src/clean.ts"]]);
 
     off();
+  });
+
+  it("generates non-colliding diff tab ids and Korean labels", () => {
+    expect(diffTabId("src/App.tsx", false)).toBe("diff:worktree:src/App.tsx");
+    expect(diffTabId("./src\\App.tsx", false)).toBe("diff:worktree:src/App.tsx");
+    expect(diffTabId("src/App.tsx", true)).toBe("diff:staged:src/App.tsx");
+
+    expect(parseDiffTabId("diff:worktree:src/App.tsx")).toEqual({
+      path: "src/App.tsx",
+      staged: false,
+    });
+    expect(parseDiffTabId("diff:staged:src/App.tsx")).toEqual({
+      path: "src/App.tsx",
+      staged: true,
+    });
+    expect(parseDiffTabId("src/App.tsx")).toBeNull();
+
+    expect(normalizeTabId("diff:staged:./src/App.tsx")).toBe("diff:staged:src/App.tsx");
+    expect(normalizeTabId("./src/App.tsx")).toBe("src/App.tsx");
+
+    expect(diffTabLabel("src/App.tsx", false)).toBe("App.tsx (변경 사항)");
+    expect(diffTabLabel("src/App.tsx", true)).toBe("App.tsx (스테이징됨)");
+    expect(diffTabLabel("README.md", false)).toBe("README.md (변경 사항)");
+    expect(diffTabLabel("src/App.tsx", true, "abcdef123456")).toBe("App.tsx (abcdef1)");
+    expect(commitDiffTabId("abcdef123456", "./src/App.tsx")).toBe("diff:commit:abcdef1:src/App.tsx");
+    expect(parseDiffTabId("diff:commit:abcdef1:src/App.tsx")).toEqual({
+      path: "src/App.tsx",
+      staged: true,
+      commit: "abcdef1",
+    });
+    expect(normalizeTabId("diff:commit:abcdef1:./src/App.tsx")).toBe("diff:commit:abcdef1:src/App.tsx");
+  });
+
+  it("opens read-only commit diff tabs without being affected by worktree rename or delete", () => {
+    openCommitDiff("/repo", "abcdef1234567890", "src/a.ts");
+    openCommitDiff("/repo", "abcdef1234567890", "src/b.ts", "src/old.ts");
+    // Re-opening focuses existing tab without duplicating.
+    openCommitDiff("/repo", "abcdef1234567890", "./src/a.ts");
+
+    let view = getRootEditorView("/repo");
+    expect(view.tabs).toHaveLength(2);
+    expect(view.active).toBe("diff:commit:abcdef1:src/a.ts");
+    expect(view.tabs[0]).toMatchObject({
+      id: "diff:commit:abcdef1:src/a.ts",
+      path: "src/a.ts",
+      kind: "diff",
+      staged: true,
+      commitHash: "abcdef1234567890",
+    });
+    expect(view.tabs[1].origPath).toBe("src/old.ts");
+
+    // Worktree rename/delete must leave historical commit diff tabs untouched.
+    renamePath("/repo", "src", "lib");
+    handleDeletedPath("/repo", "src/a.ts");
+    view = getRootEditorView("/repo");
+    expect(view.tabs.map((t) => t.id)).toEqual([
+      "diff:commit:abcdef1:src/a.ts",
+      "diff:commit:abcdef1:src/b.ts",
+    ]);
+  });
+
+  it("opens, focuses, updates, and closes diff tabs separately from normal file tabs", () => {
+    const closed: [string, string][] = [];
+    const off = onTabClosed((r, id) => closed.push([r, id]));
+
+    openFile("/repo", "src/a.ts");
+    openDiff("/repo", "src/a.ts", { staged: false });
+    openDiff("/repo", "./src/a.ts", { staged: true });
+
+    let view = getRootEditorView("/repo");
+    expect(view.tabs.map((t) => ({ id: t.id, path: t.path, kind: t.kind, staged: t.staged }))).toEqual([
+      { id: "src/a.ts", path: "src/a.ts", kind: "file", staged: undefined },
+      { id: "diff:worktree:src/a.ts", path: "src/a.ts", kind: "diff", staged: false },
+      { id: "diff:staged:src/a.ts", path: "src/a.ts", kind: "diff", staged: true },
+    ]);
+    expect(view.active).toBe("diff:staged:src/a.ts");
+
+    // Re-opening an existing diff tab focuses it without duplicating.
+    openDiff("/repo", "src/a.ts", { staged: false });
+    view = getRootEditorView("/repo");
+    expect(view.tabs).toHaveLength(3);
+    expect(view.active).toBe("diff:worktree:src/a.ts");
+
+    // Dirty state on a diff tab does not affect the normal tab for the same file.
+    setTabState("/repo", "diff:worktree:src/a.ts", { dirty: true, mtime: 999 });
+    view = getRootEditorView("/repo");
+    expect(view.tabs.find((t) => t.id === "src/a.ts")?.dirty).toBe(false);
+    expect(view.tabs.find((t) => t.id === "diff:worktree:src/a.ts")?.dirty).toBe(true);
+    expect(view.tabs.find((t) => t.id === "diff:worktree:src/a.ts")?.mtime).toBe(999);
+
+    // Closing the active diff tab moves focus to its right neighbour and fires close listeners.
+    closeTab("/repo", "diff:worktree:src/a.ts");
+    view = getRootEditorView("/repo");
+    expect(view.tabs.map((t) => t.id)).toEqual(["src/a.ts", "diff:staged:src/a.ts"]);
+    expect(view.active).toBe("diff:staged:src/a.ts");
+    expect(closed).toEqual([["/repo", "diff:worktree:src/a.ts"]]);
+
+    // Closing the staged diff tab moves focus back to the normal tab.
+    closeTab("/repo", "diff:staged:src/a.ts");
+    view = getRootEditorView("/repo");
+    expect(view.tabs.map((t) => t.id)).toEqual(["src/a.ts"]);
+    expect(view.active).toBe("src/a.ts");
+
+    off();
+  });
+
+  it("renames and deletes diff tabs alongside normal tabs", () => {
+    const renamed: [string, string, string][] = [];
+    const closed: [string, string][] = [];
+    const offRename = onTabRenamed((r, f, t) => renamed.push([r, f, t]));
+    const offClose = onTabClosed((r, id) => closed.push([r, id]));
+
+    openFile("/repo", "src/a.ts");
+    openDiff("/repo", "src/a.ts", { staged: false });
+    openDiff("/repo", "src/a.ts", { staged: true });
+    openDiff("/repo", "other/b.ts", { staged: false });
+    activateTab("/repo", "diff:worktree:src/a.ts");
+
+    // Folder rename updates matching normal and diff tabs, active id, and listeners.
+    renamePath("/repo", "src", "lib");
+    let view = getRootEditorView("/repo");
+    expect(view.tabs.map((t) => ({ id: t.id, path: t.path }))).toEqual([
+      { id: "lib/a.ts", path: "lib/a.ts" },
+      { id: "diff:worktree:lib/a.ts", path: "lib/a.ts" },
+      { id: "diff:staged:lib/a.ts", path: "lib/a.ts" },
+      { id: "diff:worktree:other/b.ts", path: "other/b.ts" },
+    ]);
+    expect(view.active).toBe("diff:worktree:lib/a.ts");
+    expect(renamed).toEqual([
+      ["/repo", "src/a.ts", "lib/a.ts"],
+      ["/repo", "diff:worktree:src/a.ts", "diff:worktree:lib/a.ts"],
+      ["/repo", "diff:staged:src/a.ts", "diff:staged:lib/a.ts"],
+    ]);
+
+    // Mark the unstaged diff tab dirty, leave normal & staged diff clean, then delete `lib`.
+    setTabState("/repo", "diff:worktree:lib/a.ts", { dirty: true });
+    handleDeletedPath("/repo", "lib");
+
+    view = getRootEditorView("/repo");
+    expect(view.tabs.map((t) => ({ id: t.id, dirty: t.dirty, deleted: t.deleted }))).toEqual([
+      { id: "diff:worktree:lib/a.ts", dirty: true, deleted: true },
+      { id: "diff:worktree:other/b.ts", dirty: false, deleted: false },
+    ]);
+    expect(view.active).toBe("diff:worktree:lib/a.ts");
+    expect(closed).toEqual([
+      ["/repo", "lib/a.ts"],
+      ["/repo", "diff:staged:lib/a.ts"],
+    ]);
+
+    offRename();
+    offClose();
   });
 });
 
@@ -497,5 +664,154 @@ describe("copy naming, paste target, rename selection, and menu helpers", () => 
     const offLater = onAttach((paths) => later.push(paths));
     expect(later).toEqual([["/repo/src/main.tsx"]]);
     offLater();
+  });
+});
+
+describe("editor tab bulk-close and context menu helpers", () => {
+  const ordered = ["a.ts", "b.ts", "c.ts", "d.ts"];
+
+  it("picks the right tab ids to close for others, left, right, saved, and all", () => {
+    const dirty = new Set(["b.ts", "d.ts"]);
+
+    expect(tabIdsToClose(ordered, "b.ts", "others", dirty)).toEqual(["a.ts", "c.ts", "d.ts"]);
+    expect(tabIdsToClose(ordered, "a.ts", "others", dirty)).toEqual(["b.ts", "c.ts", "d.ts"]);
+    expect(tabIdsToClose(["a.ts"], "a.ts", "others", dirty)).toEqual([]);
+    expect(tabIdsToClose(ordered, "missing.ts", "others", dirty)).toEqual([]);
+
+    expect(tabIdsToClose(ordered, "a.ts", "left", dirty)).toEqual([]);
+    expect(tabIdsToClose(ordered, "c.ts", "left", dirty)).toEqual(["a.ts", "b.ts"]);
+    expect(tabIdsToClose(ordered, "missing.ts", "left", dirty)).toEqual([]);
+
+    expect(tabIdsToClose(ordered, "d.ts", "right", dirty)).toEqual([]);
+    expect(tabIdsToClose(ordered, "b.ts", "right", dirty)).toEqual(["c.ts", "d.ts"]);
+    expect(tabIdsToClose(ordered, "missing.ts", "right", dirty)).toEqual([]);
+
+    expect(tabIdsToClose(ordered, "b.ts", "saved", dirty)).toEqual(["a.ts", "c.ts"]);
+    expect(tabIdsToClose(ordered, "b.ts", "saved", new Set(ordered))).toEqual([]);
+    expect(tabIdsToClose(ordered, "b.ts", "saved", new Set())).toEqual(ordered);
+
+    expect(tabIdsToClose(ordered, "b.ts", "all", dirty)).toEqual(ordered);
+  });
+
+  it("picks the next active tab after a bulk close", () => {
+    // Active tab survives -> unchanged.
+    expect(nextActiveAfterBulkClose(ordered, "c.ts", ["a.ts", "b.ts"])).toBe("c.ts");
+    expect(nextActiveAfterBulkClose(ordered, "b.ts", ["a.ts", "c.ts", "d.ts"])).toBe("b.ts");
+
+    // Active tab closed -> first surviving neighbour to the right.
+    expect(nextActiveAfterBulkClose(["a", "b", "c", "d", "e"], "b", ["b", "c", "d"])).toBe("e");
+    // Independent of closing iterable order.
+    expect(nextActiveAfterBulkClose(["a", "b", "c", "d", "e"], "b", ["d", "c", "b"])).toBe("e");
+    // Non-contiguous close (e.g. closing saved tabs).
+    expect(nextActiveAfterBulkClose(["a", "b", "c", "d", "e"], "b", ["b", "d"])).toBe("c");
+
+    // Active tab closed with nothing surviving to the right -> nearest left neighbour.
+    expect(nextActiveAfterBulkClose(ordered, "c.ts", ["c.ts", "d.ts"])).toBe("b.ts");
+    expect(nextActiveAfterBulkClose(ordered, "d.ts", ["b.ts", "c.ts", "d.ts"])).toBe("a.ts");
+
+    // All tabs closed -> null.
+    expect(nextActiveAfterBulkClose(ordered, "b.ts", ordered)).toBeNull();
+
+    // Closing nothing or unknown ids leaves active untouched.
+    expect(nextActiveAfterBulkClose(ordered, "b.ts", [])).toBe("b.ts");
+    expect(nextActiveAfterBulkClose(ordered, "b.ts", ["missing.ts"])).toBe("b.ts");
+
+    // Null active picks a remaining tab when closing open tabs.
+    expect(nextActiveAfterBulkClose(["a", "b", "c"], null, ["a", "b"])).toBe("c");
+  });
+
+  it("builds editor tab menu sections for normal and diff tabs with proper disabled states", () => {
+    const firstSections = buildEditorTabMenuSections({
+      orderedIds: ordered,
+      targetId: "a.ts",
+      dirtyIds: new Set(ordered),
+      isDiff: false,
+      platform: "mac",
+    });
+    expect(firstSections).toHaveLength(2);
+    const firstItems = firstSections.flatMap((s) => s.items);
+    expect(firstItems.map((i) => i.id)).toEqual([
+      "close",
+      "closeOthers",
+      "closeLeft",
+      "closeRight",
+      "closeSaved",
+      "closeAll",
+      "copyPath",
+      "copyRelativePath",
+      "revealInTree",
+    ]);
+    expect(firstItems.find((i) => i.id === "close")?.shortcut).toBe("⌘W");
+    expect(firstItems.find((i) => i.id === "closeLeft")?.disabled).toBe(true);
+    expect(firstItems.find((i) => i.id === "closeRight")?.disabled).toBe(false);
+    expect(firstItems.find((i) => i.id === "closeSaved")?.disabled).toBe(true);
+    expect(firstItems.find((i) => i.id === "closeOthers")?.disabled).toBe(false);
+
+    const lastDiffSections = buildEditorTabMenuSections({
+      orderedIds: ordered,
+      targetId: "d.ts",
+      dirtyIds: new Set(["a.ts"]),
+      isDiff: true,
+      platform: "windows",
+    });
+    const lastDiffItems = lastDiffSections.flatMap((s) => s.items);
+    expect(lastDiffItems.map((i) => i.id)).toContain("openFile");
+    expect(lastDiffItems.find((i) => i.id === "close")?.shortcut).toBe("Ctrl+W");
+    expect(lastDiffItems.find((i) => i.id === "closeLeft")?.disabled).toBe(false);
+    expect(lastDiffItems.find((i) => i.id === "closeRight")?.disabled).toBe(true);
+    expect(lastDiffItems.find((i) => i.id === "closeSaved")?.disabled).toBe(false);
+
+    const singleItems = buildEditorTabMenuSections({
+      orderedIds: ["only.ts"],
+      targetId: "only.ts",
+      dirtyIds: new Set(),
+      isDiff: false,
+      platform: "mac",
+    }).flatMap((s) => s.items);
+    expect(singleItems.find((i) => i.id === "closeOthers")?.disabled).toBe(true);
+    expect(singleItems.find((i) => i.id === "closeLeft")?.disabled).toBe(true);
+    expect(singleItems.find((i) => i.id === "closeRight")?.disabled).toBe(true);
+    expect(singleItems.find((i) => i.id === "closeSaved")?.disabled).toBe(false);
+    expect(singleItems.find((i) => i.id === "closeAll")?.disabled).toBe(false);
+  });
+
+  it("supports atomic closeTabs and revealInTree in editorStore", () => {
+    resetEditorStore();
+    const closed: [string, string][] = [];
+    const reveals: [string, string][] = [];
+    const offClose = onTabClosed((r, id) => closed.push([r, id]));
+    const offReveal = onRevealInTree((r, p) => reveals.push([r, p]));
+
+    openFile("/repo", "a.ts", 5);
+    openFile("/repo", "b.ts");
+    openFile("/repo", "c.ts");
+    openFile("/repo", "d.ts");
+    activateTab("/repo", "b.ts");
+
+    const spy = vi.fn();
+    const unsub = subscribeEditor(spy);
+
+    // Atomic bulk close emits once and picks right surviving neighbour.
+    closeTabs("/repo", ["b.ts", "c.ts"]);
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(getRootEditorView("/repo").tabs.map((t) => t.id)).toEqual(["a.ts", "d.ts"]);
+    expect(getRootEditorView("/repo").active).toBe("d.ts");
+    expect(closed).toEqual([
+      ["/repo", "b.ts"],
+      ["/repo", "c.ts"],
+    ]);
+
+    // Reveal request updates view, notifies listeners, rewrites on rename, and clears cleanly.
+    revealInTree("/repo", "./src/foo.ts");
+    expect(reveals).toEqual([["/repo", "src/foo.ts"]]);
+    const rev = getRootEditorView("/repo").reveal;
+    expect(rev).toMatchObject({ path: "src/foo.ts" });
+
+    clearReveal("/repo", rev!.seq);
+    expect(getRootEditorView("/repo").reveal).toBeNull();
+
+    unsub();
+    offClose();
+    offReveal();
   });
 });

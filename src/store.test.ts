@@ -220,6 +220,17 @@ describe("agent mode tasks", () => {
     ]);
   });
 
+  it("keep the lead's workspace selected when their chat is opened", () => {
+    const event = {
+      task: task("a1-1", { sessionId: "sub", status: "running" }),
+      session: { agentId: "dsh", sessionId: "sub", cwd: "/worktrees/zed-agent-a1-1", launch: {}, configOptions: null, modes: null },
+      brief: "Write the tests",
+    };
+    const state = run(lead(), { type: "taskSession", event }, { type: "activate", key: "dsh:sub" });
+    expect(state.activeKey).toBe("dsh:sub");
+    expect(state.workspace).toBe("/work");
+  });
+
   it("open their own chat and mirror running state on it", () => {
     const event = {
       task: task("a1-1", { sessionId: "sub", status: "running" }),

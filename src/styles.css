@@ -577,6 +577,20 @@ button {
   border: 0;
   background: transparent;
 }
+.terminal-tab-input {
+  width: 104px;
+  min-width: 64px;
+  height: 20px;
+  padding: 0 5px;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  outline: none;
+}
 .terminal-tab-close,
 .terminal-tab-add {
   display: inline-flex;
@@ -2614,6 +2628,7 @@ body {
   flex-direction: column;
   min-width: 0;
   min-height: 0;
+  overflow: hidden;
   background: var(--sidebar);
 }
 .pro-pane-head {
@@ -2646,7 +2661,7 @@ body {
   flex-direction: column;
   min-width: 0;
   min-height: 0;
-  overflow: auto;
+  overflow: hidden;
 }
 
 .pro-splitter {
@@ -2760,4 +2775,31 @@ body {
 }
 .pro-chat-panel .composer-meta {
   flex-wrap: wrap;
+}
+
+/* "back to the latest message": a round button floating over the end of the thread */
+.jump-anchor {
+  position: relative;
+  z-index: 5;
+  height: 0;
+}
+.jump-bottom {
+  position: absolute;
+  bottom: 12px;
+  left: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--text-2);
+  box-shadow: 0 2px 10px rgb(0 0 0 / 12%);
+  transform: translateX(-50%);
+}
+.jump-bottom:hover {
+  background: var(--surface-2);
+  color: var(--text);
 }

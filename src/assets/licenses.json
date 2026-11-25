@@ -102,6 +102,13 @@
    "source": "npm"
   },
   {
+   "name": "@codemirror/merge",
+   "version": "6.12.3",
+   "license": "MIT",
+   "url": "https://code.haverbeke.berlin/codemirror/merge",
+   "source": "npm"
+  },
+  {
    "name": "@codemirror/search",
    "version": "6.7.2",
    "license": "MIT",
@@ -3502,6 +3509,13 @@
    "license": "MIT",
    "url": "https://github.com/rapidfuzz/strsim-rs",
    "source": "cargo"
+  },
+  {
+   "name": "style-mod",
+   "version": "4.1.5",
+   "license": "MIT",
+   "url": "https://code.haverbeke.berlin/marijn/style-mod",
+   "source": "npm"
   },
   {
    "name": "style-to-object",

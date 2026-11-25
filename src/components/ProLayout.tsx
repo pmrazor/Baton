@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ComponentType, type PointerEvent, type ReactNode } from "react";
-import { Download, Folder, FolderPlus, PanelRightClose, PanelRightOpen, X } from "lucide-react";
+import { Download, Folder, FolderPlus, GitBranch, PanelRightClose, PanelRightOpen, X } from "lucide-react";
 import { installedAgents } from "../types";
 import {
   ActivityView,
@@ -23,9 +23,11 @@ import {
   toggleSubSidebar,
   type ProViewId,
 } from "./proLayoutState";
+import { onRevealInTree } from "./code/editorStore";
 
 const VIEW_ICONS: Record<ProViewId, ComponentType<{ size?: number }>> = {
   files: Folder,
+  git: GitBranch,
 };
 
 const RAIL_VIEWS: readonly ProRailViewItem[] = PRO_VIEWS.map((v) => ({
@@ -38,6 +40,8 @@ export interface ProLayoutProps {
   chat: ChatViewProps;
   /** Rendered inside the sub-sidebar when the 파일 view is active. */
   fileTree: ReactNode;
+  /** Rendered inside the sub-sidebar when the 깃 view is active. */
+  gitPanel: ReactNode;
   /** Rendered inside the center area when the 코드 tab is active. */
   editor: ReactNode;
   subWidth: number;
@@ -103,6 +107,15 @@ export default function ProLayout(p: ProLayoutProps) {
   const cwd = session?.cwd ?? state.workspace;
   const activeViewMeta = activeView ? PRO_VIEWS.find((v) => v.id === activeView) : null;
 
+  // Open the 파일 sub-sidebar when an editor tab asks to reveal a file in the tree.
+  useEffect(() => {
+    return onRevealInTree((revealRoot) => {
+      if (revealRoot !== cwd) return;
+      setActiveView("files");
+      setLastView("files");
+    });
+  }, [cwd]);
+
   const reopenChatButton =
     chatPanelMode === "collapsed" ? (
       <button
@@ -147,7 +160,10 @@ export default function ProLayout(p: ProLayoutProps) {
                   <X size={14} />
                 </button>
               </div>
-              <div className="pro-pane-body">{activeView === "files" && p.fileTree}</div>
+              <div className="pro-pane-body">
+                {activeView === "files" && p.fileTree}
+                {activeView === "git" && p.gitPanel}
+              </div>
             </aside>
             <Splitter
               label="사이드바 너비 조절"

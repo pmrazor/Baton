@@ -1,6 +1,6 @@
 [package]
 name = "baton"
-version = "0.2.0"
+version = "0.2.1"
 description = "Baton: one workspace for many coding agents over ACP"
 edition = "2021"
 

@@ -39,7 +39,7 @@ pub struct MergeOutcome {
     pub conflicts: Vec<String>,
 }
 
-fn git(dir: &Path) -> Command {
+pub(crate) fn git(dir: &Path) -> Command {
     let mut cmd = Command::new("git");
     cmd.arg("-C").arg(dir).stdin(Stdio::null());
     hide_window(&mut cmd);
@@ -52,7 +52,7 @@ fn git(dir: &Path) -> Command {
 }
 
 /// Windows: no console window flashing up for each git call.
-fn hide_window(cmd: &mut Command) {
+pub(crate) fn hide_window(cmd: &mut Command) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -62,7 +62,7 @@ fn hide_window(cmd: &mut Command) {
     let _ = cmd;
 }
 
-fn run(cmd: &mut Command) -> Result<Vec<u8>, String> {
+pub(crate) fn run(cmd: &mut Command) -> Result<Vec<u8>, String> {
     let out = cmd.output().map_err(|e| format!("git를 실행하지 못했어요: {e}"))?;
     if out.status.success() {
         Ok(out.stdout)
@@ -82,7 +82,7 @@ pub fn repo_root(dir: &Path) -> Option<PathBuf> {
 
 /// A path printed by git. Git for Windows prints `C:/Users/…`; keep it in
 /// the native form, since `cmd` reads `/Users` as an option switch.
-fn native_path(text: &str) -> PathBuf {
+pub(crate) fn native_path(text: &str) -> PathBuf {
     if cfg!(windows) { PathBuf::from(text.replace('/', "\\")) } else { PathBuf::from(text) }
 }
 

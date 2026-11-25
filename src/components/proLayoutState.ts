@@ -4,9 +4,9 @@ export type UiMode = "simple" | "pro";
 
 /**
  * Views available in the Pro mode sub-sidebar.
- * Extend this union and `PRO_VIEWS` when adding 찾기 (search) or 깃 (git).
+ * Extend this union and `PRO_VIEWS` when adding 찾기 (search).
  */
-export type ProViewId = "files";
+export type ProViewId = "files" | "git";
 
 export interface ProViewDef {
   id: ProViewId;
@@ -15,9 +15,9 @@ export interface ProViewDef {
 
 export const PRO_VIEWS: readonly ProViewDef[] = [
   { id: "files", label: "파일" },
+  { id: "git", label: "깃" },
   // Future entries:
   // { id: "search", label: "찾기" },
-  // { id: "git", label: "깃" },
 ];
 
 export const SUB_SIDEBAR_WIDTH = {

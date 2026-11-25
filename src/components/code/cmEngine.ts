@@ -116,7 +116,7 @@ export function deleteSession(key: string): void {
   sessions.delete(key);
 }
 
-const koreanPhrases = EditorState.phrases.of({
+export const koreanPhrases = EditorState.phrases.of({
   Find: "찾기",
   Replace: "바꾸기",
   next: "다음",
@@ -132,9 +132,10 @@ const koreanPhrases = EditorState.phrases.of({
   "replaced $ matches": "$건 바꿨어요",
   "replaced match on line $": "$번 줄에서 바꿨어요",
   "on line": "줄",
+  "$ unchanged lines": "변경 없는 $줄 펼치기",
 });
 
-const batonHighlightStyle = HighlightStyle.define([
+export const batonHighlightStyle = HighlightStyle.define([
   { tag: [tags.keyword, tags.controlKeyword, tags.moduleKeyword, tags.operatorKeyword], color: "var(--cm-keyword)" },
   { tag: [tags.string, tags.special(tags.string), tags.regexp], color: "var(--cm-string)" },
   { tag: [tags.comment, tags.lineComment, tags.blockComment, tags.docComment], color: "var(--cm-comment)", fontStyle: "italic" },
@@ -152,7 +153,7 @@ const batonHighlightStyle = HighlightStyle.define([
   { tag: [tags.invalid], color: "var(--danger)" },
 ]);
 
-const batonTheme = EditorView.theme({
+export const batonTheme = EditorView.theme({
   "&": {
     height: "100%",
     backgroundColor: "var(--bg)",
@@ -266,7 +267,7 @@ const batonTheme = EditorView.theme({
   },
 });
 
-async function loadLanguageExtension(lang: Exclude<LanguageId, null>): Promise<Extension> {
+export async function loadLanguageExtension(lang: Exclude<LanguageId, null>): Promise<Extension> {
   let promise = langCache.get(lang);
   if (!promise) {
     promise = (async (): Promise<Extension> => {
@@ -326,7 +327,7 @@ async function loadLanguageExtension(lang: Exclude<LanguageId, null>): Promise<E
   return promise;
 }
 
-function lineSeparatorOf(text: string): string {
+export function lineSeparatorOf(text: string): string {
   return text.includes("\r\n") ? "\r\n" : "\n";
 }
 

@@ -37,7 +37,14 @@ import {
   type SelectedTreeEntry,
   type TreeMenuActionId,
 } from "./codeHelpers";
-import { handleDeletedPath, openFile, registerRoot, renamePath, useEditorRoot } from "./editorStore";
+import {
+  clearReveal,
+  handleDeletedPath,
+  openFile,
+  registerRoot,
+  renamePath,
+  useEditorRoot,
+} from "./editorStore";
 import "./code.css";
 
 export interface FileTreeProps {
@@ -173,7 +180,7 @@ function FileIcon({ path }: { path: string }) {
 }
 
 export default function FileTree({ root, onOpen }: FileTreeProps) {
-  const { active } = useEditorRoot(root);
+  const { active, reveal } = useEditorRoot(root);
   const [, bump] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
   const [loadingDirs, setLoadingDirs] = useState<Set<string>>(() => new Set());
@@ -233,6 +240,54 @@ export default function FileTree({ root, onOpen }: FileTreeProps) {
       rerender();
     }
   }, [root, loadDir, rerender]);
+
+  // Expand ancestor folders, select, and scroll to a file revealed from an editor tab.
+  useEffect(() => {
+    if (!reveal) return;
+    const targetPath = reveal.path;
+    const seq = reveal.seq;
+    let cancelled = false;
+
+    void (async () => {
+      const cache = getTreeCache(root);
+      const targetParent = parentDir(targetPath);
+      const ancestors = ancestorDirs(targetParent);
+      const dirsToLoad: string[] = [];
+      if (!cache.children.has("")) dirsToLoad.push("");
+      for (const dir of ancestors) {
+        cache.expanded.add(dir);
+        if (!cache.children.has(dir)) {
+          dirsToLoad.push(dir);
+        }
+      }
+      if (!findEntryInCache(cache, targetPath) && !dirsToLoad.includes(targetParent)) {
+        dirsToLoad.push(targetParent);
+      }
+      cache.selected = { path: targetPath, dir: false };
+      clearReveal(root, seq);
+      rerender();
+
+      if (dirsToLoad.length > 0) {
+        await Promise.all(dirsToLoad.map((dir) => loadDir(dir)));
+      }
+      if (cancelled) return;
+
+      requestAnimationFrame(() => {
+        const rows = bodyRef.current?.querySelectorAll<HTMLElement>("[data-path]");
+        if (!rows) return;
+        for (const row of rows) {
+          if (row.dataset.path === targetPath) {
+            row.scrollIntoView({ block: "nearest" });
+            break;
+          }
+        }
+      });
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [root, reveal, loadDir, rerender]);
 
   const creatingKey = creating ? `${creating.kind}:${creating.targetDir}` : null;
   useEffect(() => {
@@ -954,6 +1009,7 @@ export default function FileTree({ root, onOpen }: FileTreeProps) {
                 type="button"
                 className={`code-tree-row${isSelected ? " selected" : ""}${isCut ? " cut" : ""}`}
                 style={{ paddingLeft }}
+                data-path={entry.path}
                 title={entry.path}
                 aria-expanded={isExpanded}
                 onClick={() => handleDirClick(entry.path)}
@@ -1005,6 +1061,7 @@ export default function FileTree({ root, onOpen }: FileTreeProps) {
             isCut ? " cut" : ""
           }`}
           style={{ paddingLeft: paddingLeft + 14 }}
+          data-path={entry.path}
           title={entry.path}
           onClick={() => handleFileClick(entry.path)}
           onContextMenu={(e) => openRowMenu(e, entry)}

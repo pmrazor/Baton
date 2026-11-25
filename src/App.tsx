@@ -35,7 +35,9 @@ import { findUpdate } from "./update";
 import type { Update } from "@tauri-apps/plugin-updater";
 import { quotasFromUsageReport } from "./usage";
 import FileTree from "./components/code/FileTree";
+import GitPanel from "./components/git/GitPanel";
 import CodeEditor from "./components/code/CodeEditor";
+import { openCommitDiff, openDiff } from "./components/code/editorStore";
 
 // Per-user conveniences only; losing them just resets the sidebar.
 const STORE = {
@@ -692,6 +694,21 @@ export default function App() {
   const codeRoot = active?.cwd ?? state.workspace;
   const fileTree = codeRoot ? <FileTree key={codeRoot} root={codeRoot} onOpen={openCode} /> : null;
   const editor = codeRoot ? <CodeEditor key={codeRoot} root={codeRoot} /> : null;
+  // TODO: open the diff editor tab for (path, staged) once it lands; for now just show the 코드 tab.
+  const gitPanel = codeRoot ? (
+    <GitPanel
+      key={codeRoot}
+      root={codeRoot}
+      onOpenDiff={(path, staged) => {
+        openDiff(codeRoot, path, { staged });
+        openCode();
+      }}
+      onOpenCommitDiff={(hash, path, origPath) => {
+        openCommitDiff(codeRoot, hash, path, origPath);
+        openCode();
+      }}
+    />
+  ) : null;
 
   return (
     <TeamsContext.Provider value={state.teams}>
@@ -713,6 +730,7 @@ export default function App() {
           }}
           chat={{ ...chatProps, showTitle: false }}
           fileTree={fileTree}
+          gitPanel={gitPanel}
           editor={editor}
           subWidth={proSubWidth}
           onSubWidthChange={setProSubWidth}
