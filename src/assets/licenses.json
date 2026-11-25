@@ -585,6 +585,13 @@
    "source": "cargo"
   },
   {
+   "name": "bstr",
+   "version": "1.13.1",
+   "license": "MIT OR Apache-2.0",
+   "url": "https://github.com/BurntSushi/bstr",
+   "source": "cargo"
+  },
+  {
    "name": "bumpalo",
    "version": "3.20.4",
    "license": "MIT OR Apache-2.0",
@@ -846,6 +853,20 @@
   {
    "name": "crossbeam-channel",
    "version": "0.5.17",
+   "license": "MIT OR Apache-2.0",
+   "url": "https://github.com/crossbeam-rs/crossbeam",
+   "source": "cargo"
+  },
+  {
+   "name": "crossbeam-deque",
+   "version": "0.8.8",
+   "license": "MIT OR Apache-2.0",
+   "url": "https://github.com/crossbeam-rs/crossbeam",
+   "source": "cargo"
+  },
+  {
+   "name": "crossbeam-epoch",
+   "version": "0.9.21",
    "license": "MIT OR Apache-2.0",
    "url": "https://github.com/crossbeam-rs/crossbeam",
    "source": "cargo"
@@ -1446,6 +1467,13 @@
    "source": "cargo"
   },
   {
+   "name": "globset",
+   "version": "0.4.21",
+   "license": "Unlicense OR MIT",
+   "url": "https://github.com/BurntSushi/ripgrep/tree/master/crates/globset",
+   "source": "cargo"
+  },
+  {
    "name": "gobject-sys",
    "version": "0.18.0",
    "license": "MIT",
@@ -1709,6 +1737,13 @@
    "version": "1.2.2",
    "license": "Apache-2.0 OR MIT",
    "url": "https://github.com/hsivonen/idna_adapter",
+   "source": "cargo"
+  },
+  {
+   "name": "ignore",
+   "version": "0.4.34",
+   "license": "Unlicense OR MIT",
+   "url": "https://github.com/BurntSushi/ripgrep/tree/master/crates/ignore",
    "source": "cargo"
   },
   {
@@ -2987,7 +3022,7 @@
   },
   {
    "name": "regex",
-   "version": "1.13.2",
+   "version": "1.13.1",
    "license": "MIT OR Apache-2.0",
    "url": "https://github.com/rust-lang/regex",
    "source": "cargo"

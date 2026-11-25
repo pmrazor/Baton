@@ -15,7 +15,7 @@ import {
 } from "./types";
 import { HANDOFF_BRIEF_LABEL, handoffMemo, isLimitError } from "./handoff";
 import Sidebar from "./components/Sidebar";
-import { TeamsContext } from "./components/taskLabels";
+import { canReviewChanges, TeamsContext } from "./components/taskLabels";
 import ChatView, { TitleBar, type ChatViewProps, type Tab } from "./components/ChatView";
 import ProLayout from "./components/ProLayout";
 import {
@@ -32,12 +32,14 @@ import ImportModal, { type Imported } from "./components/ImportModal";
 import UpdateBanner from "./components/UpdateBanner";
 import WindowControls from "./components/WindowControls";
 import { findUpdate } from "./update";
+import { onOpenRequest } from "./codeNav";
 import type { Update } from "@tauri-apps/plugin-updater";
 import { quotasFromUsageReport } from "./usage";
 import FileTree from "./components/code/FileTree";
 import GitPanel from "./components/git/GitPanel";
+import SearchPanel from "./components/search/SearchPanel";
 import CodeEditor from "./components/code/CodeEditor";
-import { openCommitDiff, openDiff } from "./components/code/editorStore";
+import { openCommitDiff, openDiff, openFile } from "./components/code/editorStore";
 
 // Per-user conveniences only; losing them just resets the sidebar.
 const STORE = {
@@ -88,7 +90,10 @@ function fromSaved(v: any): Session | null {
             : base.mergeState === "pending"
               ? // The worktree outlives the app but the app no longer tracks it.
                 { ...base, status: "failed", mergeState: null, limitHit: false, error: "앱을 다시 시작해서 이 작업은 병합할 수 없어요" }
-              : base;
+              : canReviewChanges(base)
+                ? // Partly merged with conflicts: those stay in the workspace, the rest is out of reach.
+                  { ...base, status: "failed", changes: [], limitHit: false, error: "앱을 다시 시작해서 남은 파일은 병합할 수 없어요" }
+                : base;
         })
       : v.tasks,
     updatedAt: v.updatedAt ?? v.createdAt ?? Date.now(),
@@ -638,6 +643,8 @@ export default function App() {
     setTab("code");
   }, []);
 
+  useEffect(() => onOpenRequest(openCode), [openCode]);
+
   const chatProps: ChatViewProps = {
     state,
     session: active,
@@ -670,20 +677,26 @@ export default function App() {
     onHandoff: handoffLead,
     onDismissLimit: (key) => dispatch({ type: "dismissLimited", key }),
     banner: update && <UpdateBanner update={update} onDismiss={() => setUpdate(null)} />,
-    onMergeTask: (session, taskId) =>
+    onMergeTask: (session, taskId, files) =>
       api
-        .mergeTask(taskId)
-        .then((r) =>
+        .mergeTask(taskId, files)
+        .then((r) => {
+          const left = r.worktree_kept && r.remaining_files?.length ? ` · ${r.remaining_files.length}개는 남겨 뒀어요` : "";
           dispatch({
             type: "notice",
             key: session.key,
             tone: r.conflicts.length ? "error" : "info",
-            text: r.conflicts.length
-              ? `병합했지만 충돌이 있어요: ${r.conflicts.join(", ")}`
-              : `${r.merged_files.length}개 파일을 워크스페이스에 병합했어요`,
-          }),
-        )
+            text:
+              (r.conflicts.length
+                ? `병합했지만 충돌이 있어요: ${r.conflicts.join(", ")}`
+                : `${r.merged_files.length}개 파일을 워크스페이스에 병합했어요`) + left,
+          });
+        })
         .catch((e) => dispatch({ type: "notice", key: session.key, text: toHubError(e).message, tone: "error" })),
+    onOpenTaskDiff: (root, hash, path) => {
+      openCommitDiff(root, hash, path);
+      openCode();
+    },
     onDiscardTask: (session, taskId) =>
       api
         .discardTask(taskId)
@@ -693,6 +706,16 @@ export default function App() {
   // The chat's own folder: a task's chat shows its worktree, like the terminal does.
   const codeRoot = active?.cwd ?? state.workspace;
   const fileTree = codeRoot ? <FileTree key={codeRoot} root={codeRoot} onOpen={openCode} /> : null;
+  const searchPanel = codeRoot ? (
+    <SearchPanel
+      key={codeRoot}
+      root={codeRoot}
+      onOpen={(path, line) => {
+        openFile(codeRoot, path, line);
+        openCode();
+      }}
+    />
+  ) : null;
   const editor = codeRoot ? <CodeEditor key={codeRoot} root={codeRoot} /> : null;
   // TODO: open the diff editor tab for (path, staged) once it lands; for now just show the 코드 tab.
   const gitPanel = codeRoot ? (
@@ -730,6 +753,7 @@ export default function App() {
           }}
           chat={{ ...chatProps, showTitle: false }}
           fileTree={fileTree}
+          searchPanel={searchPanel}
           gitPanel={gitPanel}
           editor={editor}
           subWidth={proSubWidth}

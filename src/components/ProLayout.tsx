@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ComponentType, type PointerEvent, type ReactNode } from "react";
-import { Download, Folder, FolderPlus, GitBranch, PanelRightClose, PanelRightOpen, X } from "lucide-react";
+import { Download, Folder, FolderPlus, GitBranch, PanelRightClose, PanelRightOpen, Search, X } from "lucide-react";
 import { installedAgents } from "../types";
 import {
   ActivityView,
@@ -24,9 +24,13 @@ import {
   type ProViewId,
 } from "./proLayoutState";
 import { onRevealInTree } from "./code/editorStore";
+import { detectPlatform } from "./code/codeHelpers";
+import { isSearchShortcut } from "./search/searchHelpers";
+import { requestSearchFocus } from "./search/searchStore";
 
 const VIEW_ICONS: Record<ProViewId, ComponentType<{ size?: number }>> = {
   files: Folder,
+  search: Search,
   git: GitBranch,
 };
 
@@ -40,6 +44,8 @@ export interface ProLayoutProps {
   chat: ChatViewProps;
   /** Rendered inside the sub-sidebar when the 파일 view is active. */
   fileTree: ReactNode;
+  /** Rendered inside the sub-sidebar when the 찾기 view is active. */
+  searchPanel: ReactNode;
   /** Rendered inside the sub-sidebar when the 깃 view is active. */
   gitPanel: ReactNode;
   /** Rendered inside the center area when the 코드 tab is active. */
@@ -92,16 +98,33 @@ export default function ProLayout(p: ProLayoutProps) {
   }, [chatPanelMode]);
 
   const handleToggleView = (id: ProViewId) => {
-    setActiveView((cur) => {
-      const next = toggleProView(cur, id);
-      if (next) setLastView(next);
-      return next;
-    });
+    const next = toggleProView(activeView, id);
+    setActiveView(next);
+    if (next) setLastView(next);
+    if (next === "search") requestSearchFocus();
   };
 
   const handleToggleSubSidebar = () => {
-    setActiveView((cur) => toggleSubSidebar(cur, lastView));
+    const next = toggleSubSidebar(activeView, lastView);
+    setActiveView(next);
+    if (next === "search") requestSearchFocus();
   };
+
+  // ⌘⇧F / Ctrl+Shift+F opens the 찾기 view and focuses its input. Capture phase so the
+  // editor and terminal don't swallow it first.
+  useEffect(() => {
+    const isMac = detectPlatform() === "mac";
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (!isSearchShortcut(e, isMac)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      setActiveView("search");
+      setLastView("search");
+      requestSearchFocus();
+    };
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
+  }, []);
 
   const agentName = (id: string) => state.agents.find((a) => a.id === id)?.name ?? id;
   const cwd = session?.cwd ?? state.workspace;
@@ -162,6 +185,7 @@ export default function ProLayout(p: ProLayoutProps) {
               </div>
               <div className="pro-pane-body">
                 {activeView === "files" && p.fileTree}
+                {activeView === "search" && p.searchPanel}
                 {activeView === "git" && p.gitPanel}
               </div>
             </aside>

@@ -16,7 +16,7 @@ import {
 } from "../types";
 import Composer from "./Composer";
 import UnmergedBanner from "./UnmergedBanner";
-import { ToolRow } from "./Messages";
+import { ChatRootContext, ToolRow } from "./Messages";
 import { groupTurns, TurnView } from "./Turn";
 import PermissionCard from "./PermissionCard";
 import { baseName } from "./Sidebar";
@@ -48,7 +48,10 @@ export interface ChatViewProps {
   onChangeMode: (opts: { lead?: boolean; team?: string }) => void;
   onOpenSession: (key: string) => void;
   onRetryAttach: (key: string) => void;
-  onMergeTask: (session: Session, taskId: string) => void;
+  /** Merge a worktree task: everything left, or only `files`. */
+  onMergeTask: (session: Session, taskId: string, files?: string[]) => Promise<unknown> | void;
+  /** Show one file of a task's result commit; `root` is the lead's folder. */
+  onOpenTaskDiff?: (root: string, hash: string, path: string) => void;
   /** Shown under the tab bar (e.g. an available update). */
   banner?: ReactNode;
   onDiscardTask: (session: Session, taskId: string) => void;
@@ -297,7 +300,7 @@ export function ConversationView(p: ChatViewProps & { agentName: (id: string) =>
   }, []);
 
   return (
-    <>
+    <ChatRootContext.Provider value={session?.cwd ?? null}>
       <div
         className="scroll"
         ref={listRef}
@@ -325,8 +328,9 @@ export function ConversationView(p: ChatViewProps & { agentName: (id: string) =>
                 permissions={state.permissions}
                 onOpen={p.onOpenSession}
                 onPermission={p.onPermission}
-                onMerge={(id) => session && p.onMergeTask(session, id)}
+                onMerge={(id, files) => (session ? p.onMergeTask(session, id, files) : undefined)}
                 onDiscard={(id) => session && p.onDiscardTask(session, id)}
+                onOpenTaskDiff={(hash, path) => session && p.onOpenTaskDiff?.(session.cwd, hash, path)}
                 leadBusy={busy}
               />
             ))
@@ -376,7 +380,7 @@ export function ConversationView(p: ChatViewProps & { agentName: (id: string) =>
         isTask={!!session?.parent}
         onChangeMode={p.onChangeMode}
       />
-    </>
+    </ChatRootContext.Provider>
   );
 }
 

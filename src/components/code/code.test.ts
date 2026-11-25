@@ -1,19 +1,35 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { attachToComposer, onAttach } from "../../composerBus";
+import {
+  appendDraftText,
+  attachToComposer,
+  insertIntoComposer,
+  onAttach,
+  onInsert,
+  resetComposerBus,
+} from "../../composerBus";
 import {
   ancestorDirs,
+  buildEditorMenuSections,
   buildEditorTabMenuSections,
   buildTreeMenuSections,
   clampMenuPosition,
+  codeFenceFor,
   commitDiffTabId,
+  dedentCode,
   detectPlatform,
   diffTabId,
   diffTabLabel,
+  fenceLanguageForPath,
   fileName,
   findContainingRoot,
+  formatChatSnippet,
+  formatPathWithLines,
+  isSelectionTooLong,
   joinPath,
   joinRelativePath,
   languageForPath,
+  LONG_SELECTION_MAX_CHARS,
+  LONG_SELECTION_MAX_LINES,
   nextActiveAfterBulkClose,
   nextActiveAfterClose,
   nextCopyName,
@@ -813,5 +829,243 @@ describe("editor tab bulk-close and context menu helpers", () => {
     unsub();
     offClose();
     offReveal();
+  });
+});
+
+describe("chat snippet formatting, long-selection threshold, and editor menu helpers", () => {
+  it("formats single-line and multi-line path labels cleanly", () => {
+    expect(formatPathWithLines("src/App.tsx", 12)).toBe("src/App.tsx:L12");
+    expect(formatPathWithLines("src/App.tsx", 12, 12)).toBe("src/App.tsx:L12");
+    expect(formatPathWithLines("src/App.tsx", 10, 20)).toBe("src/App.tsx:L10-L20");
+    expect(formatPathWithLines("./src\\App.tsx", 20, 10)).toBe("src/App.tsx:L10-L20");
+  });
+
+  it("derives markdown fence language tags from file paths", () => {
+    expect(fenceLanguageForPath("src/App.tsx")).toBe("tsx");
+    expect(fenceLanguageForPath("src/index.ts")).toBe("typescript");
+    expect(fenceLanguageForPath("src-tauri/src/main.rs")).toBe("rust");
+    expect(fenceLanguageForPath("README.md")).toBe("markdown");
+    expect(fenceLanguageForPath("src-tauri/Cargo.lock")).toBe("toml");
+    expect(fenceLanguageForPath("cmd/server/main.go")).toBe("go");
+    expect(fenceLanguageForPath("scripts/deploy.sh")).toBe("sh");
+    expect(fenceLanguageForPath("Dockerfile")).toBe("dockerfile");
+    expect(fenceLanguageForPath("Makefile")).toBe("makefile");
+    expect(fenceLanguageForPath("notes.txt")).toBe("");
+    expect(fenceLanguageForPath("LICENSE")).toBe("");
+    expect(fenceLanguageForPath(".gitignore")).toBe("");
+  });
+
+  it("dedents common leading indentation while preserving relative indentation and blank lines", () => {
+    expect(dedentCode("    const a = 1;\n      const b = 2;\n\n    return a + b;")).toBe(
+      "const a = 1;\n  const b = 2;\n\nreturn a + b;",
+    );
+    expect(dedentCode("\t\tif (ok) {\n\t\t\tgo();\n\t\t}")).toBe("if (ok) {\n\tgo();\n}");
+    // Selection starting mid-line (zero indent on first line) does not strip later lines.
+    expect(dedentCode("foo() {\n    return 1;\n  }")).toBe("foo() {\n    return 1;\n  }");
+    // Mixed tabs vs spaces with no common prefix are left untouched.
+    expect(dedentCode("\tfoo\n  bar")).toBe("\tfoo\n  bar");
+    // CRLF normalized to LF.
+    expect(dedentCode("  a\r\n    b\r\n  c")).toBe("a\n  b\nc");
+  });
+
+  it("formats chat snippets with line labels, language tags, dedent, and expanded backtick fences", () => {
+    expect(
+      formatChatSnippet({
+        relPath: "src/App.tsx",
+        startLine: 10,
+        endLine: 20,
+        code: "    const x = 1;\n    return <div>{x}</div>;",
+      }),
+    ).toBe("`src/App.tsx:L10-L20`\n```tsx\nconst x = 1;\nreturn <div>{x}</div>;\n```");
+
+    // Single line uses :L12.
+    expect(
+      formatChatSnippet({
+        relPath: "src/App.tsx",
+        startLine: 12,
+        endLine: 12,
+        code: "  const x = 1;",
+      }),
+    ).toBe("`src/App.tsx:L12`\n```tsx\nconst x = 1;\n```");
+
+    // Plain text file omits language tag.
+    expect(
+      formatChatSnippet({
+        relPath: "LICENSE",
+        startLine: 1,
+        code: "MIT License",
+      }),
+    ).toBe("`LICENSE:L1`\n```\nMIT License\n```");
+
+    // Backticks inside the selection widen the outer fence so markdown stays valid.
+    expect(codeFenceFor("const s = `hi`;")).toBe("```");
+    expect(codeFenceFor("``inline``")).toBe("```");
+    expect(codeFenceFor("```ts\nconst a = 1;\n```")).toBe("````");
+    expect(codeFenceFor("````md\nhello\n````")).toBe("`````");
+
+    const mdWithFence = "  ```ts\n  const x = 1;\n  ```";
+    expect(
+      formatChatSnippet({
+        relPath: "docs/guide.md",
+        startLine: 5,
+        endLine: 7,
+        code: mdWithFence,
+      }),
+    ).toBe("`docs/guide.md:L5-L7`\n````markdown\n```ts\nconst x = 1;\n```\n````");
+  });
+
+  it("detects long selections over 400 lines or 40,000 characters", () => {
+    expect(isSelectionTooLong("")).toBe(false);
+    expect(isSelectionTooLong(Array(LONG_SELECTION_MAX_LINES).fill("x").join("\n"))).toBe(false);
+    expect(isSelectionTooLong(Array(LONG_SELECTION_MAX_LINES + 1).fill("x").join("\n"))).toBe(true);
+    expect(isSelectionTooLong(Array(LONG_SELECTION_MAX_LINES + 1).fill("x").join("\r\n"))).toBe(
+      true,
+    );
+
+    expect(isSelectionTooLong("a".repeat(LONG_SELECTION_MAX_CHARS))).toBe(false);
+    expect(isSelectionTooLong("a".repeat(LONG_SELECTION_MAX_CHARS + 1))).toBe(true);
+  });
+
+  it("appends snippets to composer draft with blank-line separation", () => {
+    expect(appendDraftText("", "block")).toBe("block");
+    expect(appendDraftText("   \n  ", "block")).toBe("block");
+    expect(appendDraftText("이 코드 봐주세요", "block")).toBe("이 코드 봐주세요\n\nblock");
+    expect(appendDraftText("이 코드 봐주세요\n", "block")).toBe("이 코드 봐주세요\n\nblock");
+    expect(appendDraftText("이 코드 봐주세요\n\n", "block")).toBe("이 코드 봐주세요\n\nblock");
+    expect(appendDraftText("keep", "")).toBe("keep");
+  });
+
+  it("builds editor text-area context menu sections for selection, no-selection, and read-only states", () => {
+    const withSelEditable = buildEditorMenuSections({
+      hasSelection: true,
+      hasLineContent: true,
+      readOnly: false,
+      platform: "mac",
+    });
+    expect(withSelEditable.map((s) => s.id)).toEqual(["chat", "edit", "reference"]);
+    const flatSel = withSelEditable.flatMap((s) => s.items);
+    expect(flatSel.find((i) => i.id === "addToChat")).toEqual({
+      id: "addToChat",
+      label: "채팅에 넣기",
+      shortcut: "⌘L",
+    });
+    expect(flatSel.find((i) => i.id === "attachFile")?.label).toBe("파일을 채팅에 첨부");
+    expect(flatSel.find((i) => i.id === "cut")).toMatchObject({
+      label: "잘라내기",
+      shortcut: "⌘X",
+      disabled: false,
+    });
+    expect(flatSel.find((i) => i.id === "copy")).toMatchObject({
+      label: "복사",
+      shortcut: "⌘C",
+      disabled: false,
+    });
+    expect(flatSel.find((i) => i.id === "paste")).toMatchObject({
+      label: "붙여넣기",
+      shortcut: "⌘V",
+      disabled: false,
+    });
+    expect(flatSel.find((i) => i.id === "selectAll")).toMatchObject({
+      label: "모두 선택",
+      shortcut: "⌘A",
+    });
+    expect(flatSel.find((i) => i.id === "copyPathLine")?.label).toBe("경로와 줄 복사");
+
+    // Read-only pane with selection disables cut and paste but keeps copy, selectAll, and addToChat enabled.
+    const withSelReadOnly = buildEditorMenuSections({
+      hasSelection: true,
+      hasLineContent: true,
+      readOnly: true,
+      platform: "windows",
+    }).flatMap((s) => s.items);
+    expect(withSelReadOnly.find((i) => i.id === "addToChat")).toMatchObject({
+      label: "채팅에 넣기",
+      shortcut: "Ctrl+L",
+    });
+    expect(withSelReadOnly.find((i) => i.id === "cut")?.disabled).toBe(true);
+    expect(withSelReadOnly.find((i) => i.id === "copy")?.disabled).toBe(false);
+    expect(withSelReadOnly.find((i) => i.id === "paste")?.disabled).toBe(true);
+
+    // No selection offers "현재 줄을 채팅에 넣기", enabled when the line has content and disabled when blank.
+    const noSelLine = buildEditorMenuSections({
+      hasSelection: false,
+      hasLineContent: true,
+      readOnly: false,
+      platform: "mac",
+    }).flatMap((s) => s.items);
+    expect(noSelLine.find((i) => i.id === "addToChat")).toEqual({
+      id: "addToChat",
+      label: "현재 줄을 채팅에 넣기",
+      shortcut: "⌘L",
+      disabled: false,
+    });
+    expect(noSelLine.find((i) => i.id === "cut")?.disabled).toBe(true);
+    expect(noSelLine.find((i) => i.id === "copy")?.disabled).toBe(true);
+    expect(noSelLine.find((i) => i.id === "paste")?.disabled).toBe(false);
+
+    const noSelBlank = buildEditorMenuSections({
+      hasSelection: false,
+      hasLineContent: false,
+      readOnly: false,
+      platform: "mac",
+    }).flatMap((s) => s.items);
+    expect(noSelBlank.find((i) => i.id === "addToChat")?.disabled).toBe(true);
+  });
+});
+
+describe("composerBus insert queue and most-recent-subscriber delivery", () => {
+  beforeEach(() => {
+    resetComposerBus();
+  });
+
+  it("queues inserts while no composer is mounted and drains them in order on mount", () => {
+    insertIntoComposer("");
+    insertIntoComposer("first snippet");
+    insertIntoComposer("second snippet");
+
+    const received: string[] = [];
+    const off = onInsert((text) => received.push(text));
+    expect(received).toEqual(["first snippet", "second snippet"]);
+
+    // Subsequent inserts deliver immediately and empty strings are ignored.
+    insertIntoComposer("");
+    insertIntoComposer("third snippet");
+    expect(received).toEqual(["first snippet", "second snippet", "third snippet"]);
+
+    off();
+  });
+
+  it("delivers inserts and attachments only to the most recently mounted composer", () => {
+    const firstInserts: string[] = [];
+    const secondInserts: string[] = [];
+    const firstAttaches: string[][] = [];
+    const secondAttaches: string[][] = [];
+
+    const offInsert1 = onInsert((t) => firstInserts.push(t));
+    const offAttach1 = onAttach((p) => firstAttaches.push(p));
+
+    const offInsert2 = onInsert((t) => secondInserts.push(t));
+    const offAttach2 = onAttach((p) => secondAttaches.push(p));
+
+    insertIntoComposer("to second");
+    attachToComposer(["/repo/a.ts"]);
+
+    expect(firstInserts).toEqual([]);
+    expect(secondInserts).toEqual(["to second"]);
+    expect(firstAttaches).toEqual([]);
+    expect(secondAttaches).toEqual([["/repo/a.ts"]]);
+
+    // Unmounting the newer composer falls back to the still-mounted earlier composer.
+    offInsert2();
+    offAttach2();
+
+    insertIntoComposer("back to first");
+    attachToComposer(["/repo/b.ts"]);
+
+    expect(firstInserts).toEqual(["back to first"]);
+    expect(firstAttaches).toEqual([["/repo/b.ts"]]);
+
+    offInsert1();
+    offAttach1();
   });
 });

@@ -10,6 +10,7 @@ mod legacy;
 mod login;
 mod orchestra;
 mod profiles;
+mod search;
 mod shell_env;
 mod teams;
 mod terminal;
@@ -235,10 +236,22 @@ async fn switch_mode(
     }
 }
 
-/// Merge a finished worktree task into the workspace (the user's button).
+/// Merge a finished worktree task into the workspace (the user's buttons):
+/// everything, or only `files`, keeping the worktree for the rest.
 #[tauri::command]
-async fn merge_task(orchestra: State<'_, Orchestra>, task_id: String) -> Result<Value, HubError> {
-    orchestra.merge(&task_id).await.map_err(plain_error)
+async fn merge_task(
+    orchestra: State<'_, Orchestra>,
+    task_id: String,
+    files: Option<Vec<String>>,
+) -> Result<Value, HubError> {
+    orchestra.merge(&task_id, files).await.map_err(plain_error)
+}
+
+/// A worktree task's unmerged files, as `{ result, files: [{ status, path }] }`;
+/// `result` is a commit whose diff against its parent shows the task's changes.
+#[tauri::command]
+async fn task_changes(orchestra: State<'_, Orchestra>, task_id: String) -> Result<Value, HubError> {
+    orchestra.task_changes(&task_id).await.map_err(plain_error)
 }
 
 /// Throw away a worktree task's changes.
@@ -489,6 +502,7 @@ pub fn run() {
             import_session,
             switch_mode,
             merge_task,
+            task_changes,
             missing_paths,
             delete_agent_session,
             discard_task,
@@ -533,6 +547,7 @@ pub fn run() {
             files::fs_rename,
             files::fs_copy,
             files::fs_trash,
+            search::search_text,
             git::git_status,
             git::git_stage,
             git::git_unstage,

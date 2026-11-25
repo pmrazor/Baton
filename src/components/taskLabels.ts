@@ -85,18 +85,39 @@ export function formatReassigned(
   return `한도로 ${path}로 넘김`;
 }
 
+/** "2개 병합됨 · 3개 남음" once some of a task's files were merged on their own. */
+export function mergeProgress(t: TaskInfo): string | null {
+  const merged = t.merged?.length ?? 0;
+  if (merged === 0) return null;
+  return t.changes.length > 0 ? `${merged}개 병합됨 · ${t.changes.length}개 남음` : `${merged}개 병합됨`;
+}
+
+/**
+ * Whether the task still has a worktree with unmerged files to review: pending,
+ * or conflicted by a partial merge that left the rest (older conflicted tasks
+ * were merged whole, so their worktree is gone).
+ */
+export function canReviewChanges(t: TaskInfo): boolean {
+  if (!t.isolated || t.changes.length === 0) return false;
+  return t.mergeState === "pending" || (t.mergeState === "conflict" && (t.merged?.length ?? 0) > 0);
+}
+
 /** One line on where an isolated (worktree) task's changes stand. */
 export function mergeLine(t: TaskInfo, leadBusy: boolean): string | null {
   if (!t.isolated) return null;
+  const progress = mergeProgress(t);
   switch (t.mergeState) {
     case "pending":
-      return `${t.changes.length}개 파일 변경 · ${leadBusy ? "병합 검토 중" : "병합 대기"}`;
+      return `${progress ?? `${t.changes.length}개 파일 변경`} · ${leadBusy ? "병합 검토 중" : "병합 대기"}`;
     case "merged":
       return "워크스페이스에 병합됨";
     case "conflict":
-      return `충돌 ${t.conflicts.length}개 · 워크스페이스에서 해결해 주세요`;
+      return canReviewChanges(t)
+        ? `충돌 ${t.conflicts.length}개 · ${progress}`
+        : `충돌 ${t.conflicts.length}개 · 워크스페이스에서 해결해 주세요`;
     case "discarded":
-      return t.changes.length === 0 ? DISCARDED_EMPTY_LABEL : DISCARDED_CHANGES_LABEL;
+      if (t.changes.length === 0) return DISCARDED_EMPTY_LABEL;
+      return progress ? `${t.merged!.length}개 병합됨 · 나머지는 버렸어요` : DISCARDED_CHANGES_LABEL;
     case "none":
       return "바뀐 파일 없음";
     default:

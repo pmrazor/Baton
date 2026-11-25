@@ -620,3 +620,154 @@ export function buildEditorTabMenuSections(opts: {
     },
   ];
 }
+
+export const LONG_SELECTION_MAX_LINES = 400;
+export const LONG_SELECTION_MAX_CHARS = 40_000;
+
+const EXTRA_BASENAME_TO_FENCE: Record<string, string> = {
+  dockerfile: "dockerfile",
+  makefile: "makefile",
+  gnumakefile: "makefile",
+};
+
+const PLAIN_TEXT_EXTS = new Set(["txt", "text", "log"]);
+
+/** Format a workspace-relative file path with 1-based line numbers (`rel:L12` or `rel:L10-L20`). */
+export function formatPathWithLines(relPath: string, startLine: number, endLine?: number): string {
+  const norm = normalizeRelativePath(relPath) || relPath;
+  const a = Math.max(1, Math.floor(startLine));
+  const b = endLine === undefined ? a : Math.max(1, Math.floor(endLine));
+  const start = Math.min(a, b);
+  const end = Math.max(a, b);
+  return start === end ? `${norm}:L${start}` : `${norm}:L${start}-L${end}`;
+}
+
+/** Markdown code-fence language tag derived from a file path, or `""` for plain text. */
+export function fenceLanguageForPath(path: string): string {
+  const cmLang = languageForPath(path);
+  if (cmLang) return cmLang;
+  const base = fileName(path).toLowerCase();
+  if (base in EXTRA_BASENAME_TO_FENCE) return EXTRA_BASENAME_TO_FENCE[base];
+  const dot = base.lastIndexOf(".");
+  if (dot <= 0 || dot === base.length - 1) return "";
+  const ext = base.slice(dot + 1);
+  if (PLAIN_TEXT_EXTS.has(ext)) return "";
+  return /^[a-z0-9][a-z0-9_+-]{0,15}$/.test(ext) ? ext : "";
+}
+
+/** Remove the longest common leading whitespace prefix across non-blank lines. */
+export function dedentCode(code: string): string {
+  const lines = code.replace(/\r\n?/g, "\n").split("\n");
+  let common: string | null = null;
+  for (const line of lines) {
+    if (line.trim().length === 0) continue;
+    const indent = line.match(/^[ \t]*/)?.[0] ?? "";
+    if (common === null) {
+      common = indent;
+    } else {
+      let i = 0;
+      const max = Math.min(common.length, indent.length);
+      while (i < max && common[i] === indent[i]) i++;
+      common = common.slice(0, i);
+      if (common.length === 0) break;
+    }
+  }
+  if (!common) return lines.join("\n");
+  const prefixLen = common.length;
+  return lines
+    .map((line) => (line.trim().length === 0 ? "" : line.slice(prefixLen)))
+    .join("\n");
+}
+
+/** Pick a backtick fence strictly longer than any run of backticks in `code` (at least 3). */
+export function codeFenceFor(code: string): string {
+  let longest = 0;
+  for (const match of code.matchAll(/`+/g)) {
+    if (match[0].length > longest) longest = match[0].length;
+  }
+  return "`".repeat(Math.max(3, longest + 1));
+}
+
+/** Format an editor selection (or single line) as a markdown snippet for the chat composer. */
+export function formatChatSnippet(opts: {
+  relPath: string;
+  startLine: number;
+  endLine?: number;
+  code: string;
+}): string {
+  const header = `\`${formatPathWithLines(opts.relPath, opts.startLine, opts.endLine)}\``;
+  const lang = fenceLanguageForPath(opts.relPath);
+  const body = dedentCode(opts.code);
+  const fence = codeFenceFor(body);
+  return `${header}\n${fence}${lang}\n${body}\n${fence}`;
+}
+
+/** True when a selection exceeds the inline-snippet threshold (400 lines or 40k characters). */
+export function isSelectionTooLong(code: string): boolean {
+  if (code.length > LONG_SELECTION_MAX_CHARS) return true;
+  if (code.length === 0) return false;
+  return code.replace(/\r\n?/g, "\n").split("\n").length > LONG_SELECTION_MAX_LINES;
+}
+
+export type EditorMenuActionId =
+  | "addToChat"
+  | "attachFile"
+  | "cut"
+  | "copy"
+  | "paste"
+  | "selectAll"
+  | "copyPathLine";
+
+export interface EditorMenuItem {
+  id: EditorMenuActionId;
+  label: string;
+  shortcut?: string;
+  disabled?: boolean;
+  danger?: boolean;
+}
+
+export interface EditorMenuSection {
+  id: string;
+  items: EditorMenuItem[];
+}
+
+/** Build the right-click context menu sections for the editor text area (normal or diff). */
+export function buildEditorMenuSections(opts: {
+  hasSelection: boolean;
+  hasLineContent: boolean;
+  readOnly: boolean;
+  platform: Platform;
+}): EditorMenuSection[] {
+  const { hasSelection, hasLineContent, readOnly, platform } = opts;
+  const mod = platform === "mac" ? "⌘" : "Ctrl+";
+
+  return [
+    {
+      id: "chat",
+      items: [
+        hasSelection
+          ? { id: "addToChat", label: "채팅에 넣기", shortcut: `${mod}L` }
+          : {
+              id: "addToChat",
+              label: "현재 줄을 채팅에 넣기",
+              shortcut: `${mod}L`,
+              disabled: !hasLineContent,
+            },
+        { id: "attachFile", label: "파일을 채팅에 첨부" },
+      ],
+    },
+    {
+      id: "edit",
+      items: [
+        { id: "cut", label: "잘라내기", shortcut: `${mod}X`, disabled: readOnly || !hasSelection },
+        { id: "copy", label: "복사", shortcut: `${mod}C`, disabled: !hasSelection },
+        { id: "paste", label: "붙여넣기", shortcut: `${mod}V`, disabled: readOnly },
+        { id: "selectAll", label: "모두 선택", shortcut: `${mod}A` },
+      ],
+    },
+    {
+      id: "reference",
+      items: [{ id: "copyPathLine", label: "경로와 줄 복사" }],
+    },
+  ];
+}

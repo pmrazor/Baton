@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -24,6 +24,10 @@ import {
 } from "lucide-react";
 import type { ChatItem, PlanEntry, ToolCallContent } from "../types";
 import AttachmentView from "./AttachmentView";
+import { api } from "../api";
+import { requestOpenCode } from "../codeNav";
+import { openAbsolutePath, openDiff, openFile, registerRoot } from "./code/editorStore";
+import { isEditCall, locationLabel, resolveLocation } from "./toolLocations";
 
 type ToolItem = Extract<ChatItem, { kind: "tool" }>;
 
@@ -246,8 +250,29 @@ function toolIcon(item: ToolItem): LucideIcon {
   return TOOL_ICON[item.toolKind] ?? Wrench;
 }
 
+/** The chat's folder: relative file links in tool calls open in the code editor under it. */
+export const ChatRootContext = createContext<string | null>(null);
+
 export function ToolRow({ item }: { item: ToolItem }) {
+  const root = useContext(ChatRootContext);
   const [open, setOpen] = useState(false);
+  const editCall = isEditCall(item.toolKind, item.content);
+  const openLocation = (path: string, line?: number) => {
+    const hit = resolveLocation(root, path);
+    if (hit) {
+      registerRoot(hit.root);
+      openFile(hit.root, hit.rel, line);
+    } else if (!openAbsolutePath(path, line)) {
+      api.openAttachment(path).catch(() => {});
+      return;
+    }
+    requestOpenCode();
+  };
+  const openChanges = (hit: { root: string; rel: string }) => {
+    registerRoot(hit.root);
+    openDiff(hit.root, hit.rel, { staged: false });
+    requestOpenCode();
+  };
   const Icon = toolIcon(item);
   const hasDetails = item.content.length > 0 || item.rawInput !== undefined;
   return (
@@ -264,12 +289,26 @@ export function ToolRow({ item }: { item: ToolItem }) {
         <div className="trace-body">
           {item.locations.length > 0 && (
             <div className="tool-locations">
-              {item.locations.map((l, i) => (
-                <code key={i}>
-                  {l.path}
-                  {l.line ? `:${l.line}` : ""}
-                </code>
-              ))}
+              {item.locations.map((l, i) => {
+                const hit = editCall ? resolveLocation(root, l.path) : null;
+                return (
+                  <span key={i} className="tool-location">
+                    <button
+                      type="button"
+                      className="tool-link"
+                      title="코드 편집기에서 열기"
+                      onClick={() => openLocation(l.path, l.line ?? undefined)}
+                    >
+                      {locationLabel(l.path, l.line)}
+                    </button>
+                    {hit && (
+                      <button type="button" className="tool-link-diff" onClick={() => openChanges(hit)}>
+                        변경 보기
+                      </button>
+                    )}
+                  </span>
+                );
+              })}
             </div>
           )}
           {item.content.map((c, i) => (

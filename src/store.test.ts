@@ -248,6 +248,29 @@ describe("agent mode tasks", () => {
     expect(session(state, "lead").tasks?.[0].status).toBe("done");
   });
 
+  it("settle the earlier chat when a task moves to another member", () => {
+    const first = {
+      task: task("a1-1", { sessionId: "old", status: "running" }),
+      session: { agentId: "dsh", sessionId: "old", cwd: "/wt", launch: {}, configOptions: null, modes: null },
+      brief: "Write the tests",
+    };
+    let state = run(lead(), { type: "taskSession", event: first });
+    expect(session(state, "old", "dsh").busy).toBe(true);
+
+    const moved = task("a1-1", { agentId: "claude", sessionId: "new", status: "starting", memberName: "Claude Opus" });
+    state = run(state, {
+      type: "taskSession",
+      event: { ...first, task: moved, session: { ...first.session, agentId: "claude", sessionId: "new" } },
+    });
+    const old = session(state, "old", "dsh");
+    expect(old.busy).toBe(false);
+    expect(old.items.at(-1)).toMatchObject({ kind: "notice", text: expect.stringContaining("Claude Opus") });
+
+    state = run(state, { type: "taskUpdate", task: { ...moved, status: "running" } });
+    expect(session(state, "new").busy).toBe(true);
+    expect(session(state, "old", "dsh").items.filter((i) => i.kind === "notice")).toHaveLength(1);
+  });
+
   it("show the files the lead passed on under its brief", () => {
     const event = {
       task: task("a1-1", { sessionId: "sub", status: "running" }),

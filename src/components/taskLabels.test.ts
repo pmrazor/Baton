@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { Session, TaskInfo, Team } from "../types";
 import {
+  canReviewChanges,
   formatReassigned,
   isLimitFailed,
   memberNameMap,
   mergeLine,
+  mergeProgress,
   taskLabel,
   taskStatusBadge,
   taskSubLine,
@@ -114,6 +116,44 @@ describe("mergeLine", () => {
     expect(mergeLine(makeTask({ mergeState: "conflict", conflicts: ["src/a.ts"] }), false)).toBe(
       "충돌 1개 · 워크스페이스에서 해결해 주세요",
     );
+  });
+});
+
+describe("partial merges", () => {
+  const partial = (patch: Partial<TaskInfo> = {}) =>
+    makeTask({ mergeState: "pending", merged: ["src/a.ts", "src/b.ts"], changes: ["M src/c.ts", "A src/d.ts", "D e.ts"], ...patch });
+
+  it("counts merged and remaining files", () => {
+    expect(mergeProgress(makeTask({ mergeState: "pending", changes: ["M a.ts"] }))).toBeNull();
+    expect(mergeProgress(makeTask({ mergeState: "pending", changes: ["M a.ts"], merged: [] }))).toBeNull();
+    expect(mergeProgress(partial())).toBe("2개 병합됨 · 3개 남음");
+    expect(mergeProgress(partial({ mergeState: "merged", changes: [] }))).toBe("2개 병합됨");
+  });
+
+  it("shows the progress in mergeLine", () => {
+    expect(mergeLine(partial(), false)).toBe("2개 병합됨 · 3개 남음 · 병합 대기");
+    expect(mergeLine(partial(), true)).toBe("2개 병합됨 · 3개 남음 · 병합 검토 중");
+    expect(mergeLine(partial({ mergeState: "conflict", conflicts: ["src/b.ts"] }), false)).toBe(
+      "충돌 1개 · 2개 병합됨 · 3개 남음",
+    );
+    // The last merge removed the worktree: only the conflicts are left to deal with.
+    expect(mergeLine(partial({ mergeState: "conflict", conflicts: ["src/b.ts"], changes: [] }), false)).toBe(
+      "충돌 1개 · 워크스페이스에서 해결해 주세요",
+    );
+    expect(mergeLine(partial({ mergeState: "merged", changes: [] }), false)).toBe("워크스페이스에 병합됨");
+    expect(mergeLine(partial({ mergeState: "discarded" }), false)).toBe("2개 병합됨 · 나머지는 버렸어요");
+  });
+
+  it("offers review while a worktree has unmerged files", () => {
+    expect(canReviewChanges(makeTask({ mergeState: "pending", changes: ["M a.ts"] }))).toBe(true);
+    expect(canReviewChanges(partial())).toBe(true);
+    expect(canReviewChanges(partial({ mergeState: "conflict", conflicts: ["src/b.ts"] }))).toBe(true);
+    // A whole merge with conflicts (older tasks kept their change list): the worktree is gone.
+    expect(canReviewChanges(makeTask({ mergeState: "conflict", conflicts: ["a.ts"], changes: ["M a.ts"] }))).toBe(false);
+    expect(canReviewChanges(makeTask({ mergeState: "pending", changes: [] }))).toBe(false);
+    expect(canReviewChanges(makeTask({ isolated: false, mergeState: "pending", changes: ["M a.ts"] }))).toBe(false);
+    expect(canReviewChanges(partial({ mergeState: "discarded" }))).toBe(false);
+    expect(canReviewChanges(partial({ mergeState: "merged" }))).toBe(false);
   });
 });
 

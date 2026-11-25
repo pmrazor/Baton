@@ -287,12 +287,21 @@ export interface TaskInfo {
   changes: string[];
   mergeState: "none" | "pending" | "merged" | "conflict" | "discarded" | null;
   conflicts: string[];
+  /** Files already merged by partial merges; `changes` then lists only what is left. */
+  merged?: string[];
   /** Member switches after a limit error, e.g. "a → b (usage limit)". */
   reassigned: string[];
   /** True when the task ended or was moved because of a usage limit. */
   limitHit: boolean;
   /** The lead's user message (turn) this task was created in. */
   turnId?: string;
+}
+
+/** A worktree task's unmerged files (`task_changes`). */
+export interface TaskChanges {
+  /** Snapshot commit; its diff against its parent shows the task's changes. */
+  result: string;
+  files: { status: string; path: string }[];
 }
 
 export const isTaskActive = (s: TaskStatus) => s !== "done" && s !== "failed" && s !== "cancelled";

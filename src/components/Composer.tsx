@@ -13,7 +13,7 @@ import {
 } from "lucide-react";
 import AttachmentView from "./AttachmentView";
 import { api, toHubError } from "../api";
-import { onAttach } from "../composerBus";
+import { appendDraftText, onAttach, onInsert } from "../composerBus";
 import {
   attachmentOf,
   DEFAULT_PROFILE,
@@ -153,6 +153,23 @@ export default function Composer(p: Props) {
   }, []);
 
   useEffect(() => onAttach(addPaths), []);
+
+  useEffect(
+    () =>
+      onInsert((text) => {
+        setCmdDismissed(true);
+        setDraft((prev) => appendDraftText(prev, text));
+        requestAnimationFrame(() => {
+          const el = textRef.current;
+          if (!el) return;
+          el.focus();
+          const end = el.value.length;
+          el.setSelectionRange(end, end);
+          el.scrollTop = el.scrollHeight;
+        });
+      }),
+    [],
+  );
 
   const pickFiles = async () => {
     const picked = await openDialog({ multiple: true, directory: false, title: "첨부할 파일" });

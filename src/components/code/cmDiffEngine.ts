@@ -38,9 +38,16 @@ import {
 import {
   batonHighlightStyle,
   batonTheme,
+  editorCopy,
+  editorCut,
+  editorPaste,
+  editorSelectAll,
+  extractEditorSelection,
   koreanPhrases,
   lineSeparatorOf,
   loadLanguageExtension,
+  placeCursorAtCoordsIfEmpty,
+  type EditorSelectionInfo,
 } from "./cmEngine";
 import { languageForPath, parseDiffTabId } from "./codeHelpers";
 import { onTabClosed, onTabRenamed } from "./editorStore";
@@ -51,6 +58,8 @@ export interface DiffCallbacks {
   onDirtyChange: (key: string, dirty: boolean) => void;
   onSave: (key: string) => void;
   onChunksChange: (key: string, count: number) => void;
+  onAddToChat?: (key: string, view: EditorView) => void;
+  onContextMenu?: (key: string, view: EditorView, x: number, y: number) => void;
 }
 
 interface SplitViewHandle {
@@ -180,7 +189,11 @@ const diffTheme = EditorView.theme({
 function readOnlyExtension(editable: boolean): Extension {
   return editable
     ? [EditorState.readOnly.of(false), EditorView.editable.of(true)]
-    : [EditorState.readOnly.of(true), EditorView.editable.of(false)];
+    : [
+        EditorState.readOnly.of(true),
+        EditorView.editable.of(false),
+        EditorView.contentAttributes.of({ tabindex: "0" }),
+      ];
 }
 
 function commonDisplayExtensions(
@@ -188,6 +201,7 @@ function commonDisplayExtensions(
   lineSepCompartment: Compartment,
   sep: string,
   navKeymap: Extension,
+  getSession: () => DiffSession | undefined,
 ): Extension[] {
   return [
     lineNumbers(),
@@ -206,6 +220,19 @@ function commonDisplayExtensions(
     lineSepCompartment.of(EditorState.lineSeparator.of(sep)),
     langCompartment.of([]),
     navKeymap,
+    EditorView.domEventHandlers({
+      contextmenu(event, view) {
+        const target = event.target as HTMLElement | null;
+        if (target?.closest(".cm-panel") || target?.closest(".cm-gutters")) return false;
+        const s = getSession();
+        if (!s?.callbacks.onContextMenu) return false;
+        event.preventDefault();
+        event.stopPropagation();
+        placeCursorAtCoordsIfEmpty(view, event.clientX, event.clientY);
+        s.callbacks.onContextMenu(s.key, view, event.clientX, event.clientY);
+        return true;
+      },
+    }),
   ];
 }
 
@@ -226,6 +253,15 @@ function makeNavKeymap(getSession: () => DiffSession | undefined, allowSave: boo
           },
         ]
       : []),
+    {
+      key: "Mod-l",
+      preventDefault: true,
+      run: (view) => {
+        const s = getSession();
+        if (s) s.callbacks.onAddToChat?.(s.key, view);
+        return true;
+      },
+    },
     {
       key: "F7",
       preventDefault: true,
@@ -307,15 +343,26 @@ function buildHandle(
       a: {
         doc: originalText,
         extensions: [
-          ...commonDisplayExtensions(langA, lineSepA, lineSeparatorOf(originalText), makeNavKeymap(getSession, false)),
-          EditorState.readOnly.of(true),
-          EditorView.editable.of(false),
+          ...commonDisplayExtensions(
+            langA,
+            lineSepA,
+            lineSeparatorOf(originalText),
+            makeNavKeymap(getSession, false),
+            getSession,
+          ),
+          readOnlyExtension(false),
         ],
       },
       b: {
         doc: modifiedText,
         extensions: [
-          ...commonDisplayExtensions(langB, lineSepB, lineSeparatorOf(modifiedText), makeNavKeymap(getSession, true)),
+          ...commonDisplayExtensions(
+            langB,
+            lineSepB,
+            lineSeparatorOf(modifiedText),
+            makeNavKeymap(getSession, true),
+            getSession,
+          ),
           ...makeEditableExtensions(editableB, editable, getSession),
         ],
       },
@@ -343,7 +390,13 @@ function buildHandle(
     state: EditorState.create({
       doc: modifiedText,
       extensions: [
-        ...commonDisplayExtensions(lang, lineSep, lineSeparatorOf(modifiedText), makeNavKeymap(getSession, true)),
+        ...commonDisplayExtensions(
+          lang,
+          lineSep,
+          lineSeparatorOf(modifiedText),
+          makeNavKeymap(getSession, true),
+          getSession,
+        ),
         ...makeEditableExtensions(editableComp, editable, getSession),
         unifiedMergeView({
           original: originalText,
@@ -743,3 +796,30 @@ export function navigateDiffChunk(key: string, dir: 1 | -1): void {
   }
   targetView.focus();
 }
+
+/** Return the currently focused (or primary) `EditorView` of a mounted diff session. */
+export function getActiveDiffEditorView(key: string): EditorView | null {
+  const session = diffSessions.get(key);
+  if (!session) return null;
+  if (session.handle.kind === "unified") {
+    return session.handle.editorView;
+  }
+  const { a, b } = session.handle.mergeView;
+  if (a.hasFocus) return a;
+  if (b.hasFocus) return b;
+  const activeEl = typeof document !== "undefined" ? document.activeElement : null;
+  if (activeEl instanceof Node) {
+    if (a.dom.contains(activeEl)) return a;
+    if (b.dom.contains(activeEl)) return b;
+  }
+  return b.state.doc.length === 0 && a.state.doc.length > 0 ? a : b;
+}
+
+export {
+  editorCopy,
+  editorCut,
+  editorPaste,
+  editorSelectAll,
+  extractEditorSelection,
+  type EditorSelectionInfo,
+};

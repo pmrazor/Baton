@@ -20,7 +20,7 @@ import {
   lineNumbers,
   rectangularSelection,
 } from "@codemirror/view";
-import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
+import { defaultKeymap, history, historyKeymap, indentWithTab, selectAll } from "@codemirror/commands";
 import {
   bracketMatching,
   HighlightStyle,
@@ -37,6 +37,16 @@ import { onTabClosed, onTabRenamed } from "./editorStore";
 export interface EngineCallbacks {
   onDirtyChange: (key: string, dirty: boolean) => void;
   onSave: (key: string) => void;
+  onAddToChat?: (key: string, view: EditorView) => void;
+  onContextMenu?: (key: string, view: EditorView, x: number, y: number) => void;
+}
+
+export interface EditorSelectionInfo {
+  hasSelection: boolean;
+  startLine: number;
+  endLine: number;
+  text: string;
+  readOnly: boolean;
 }
 
 export interface TabSession {
@@ -363,12 +373,34 @@ function baseExtensions(langCompartment: Compartment, lineSepCompartment: Compar
           return true;
         },
       },
+      {
+        key: "Mod-l",
+        preventDefault: true,
+        run: (view) => {
+          const meta = viewMeta.get(view);
+          if (meta) meta.callbacks.onAddToChat?.(meta.key, view);
+          return true;
+        },
+      },
       ...closeBracketsKeymap,
       ...defaultKeymap,
       ...searchKeymap,
       ...historyKeymap,
       indentWithTab,
     ]),
+    EditorView.domEventHandlers({
+      contextmenu(event, view) {
+        const target = event.target as HTMLElement | null;
+        if (target?.closest(".cm-panel") || target?.closest(".cm-gutters")) return false;
+        const meta = viewMeta.get(view);
+        if (!meta?.callbacks.onContextMenu) return false;
+        event.preventDefault();
+        event.stopPropagation();
+        placeCursorAtCoordsIfEmpty(view, event.clientX, event.clientY);
+        meta.callbacks.onContextMenu(meta.key, view, event.clientX, event.clientY);
+        return true;
+      },
+    }),
     EditorView.updateListener.of((update) => {
       if (!update.docChanged) return;
       if (update.transactions.some((tr) => tr.annotation(ExternalReload))) return;
@@ -577,6 +609,106 @@ export function jumpToLine(view: EditorView, line: number): void {
     selection: { anchor: info.from },
     effects: EditorView.scrollIntoView(info.from, { y: "center" }),
   });
+  view.focus();
+}
+
+/** If the editor has no selection, place the cursor at the clicked coordinates. */
+export function placeCursorAtCoordsIfEmpty(view: EditorView, x: number, y: number): void {
+  if (!view.state.selection.main.empty) return;
+  const pos = view.posAtCoords({ x, y });
+  if (pos !== null && pos !== view.state.selection.main.head) {
+    view.dispatch({ selection: { anchor: pos } });
+  }
+}
+
+/** Extract the main selection (or current line when nothing is selected) from a CodeMirror view. */
+export function extractEditorSelection(view: EditorView): EditorSelectionInfo {
+  const { state } = view;
+  const sel = state.selection.main;
+  const readOnly = state.readOnly;
+  if (!sel.empty) {
+    const startLineObj = state.doc.lineAt(sel.from);
+    const endLineObj = state.doc.lineAt(sel.to);
+    let endLine = endLineObj.number;
+    let sliceEnd = sel.to;
+    if (endLineObj.from === sel.to && endLine > startLineObj.number) {
+      endLine -= 1;
+      sliceEnd = state.doc.line(endLine).to;
+    }
+    return {
+      hasSelection: true,
+      startLine: startLineObj.number,
+      endLine,
+      text: state.doc.sliceString(sel.from, sliceEnd),
+      readOnly,
+    };
+  }
+  const line = state.doc.lineAt(sel.head);
+  return {
+    hasSelection: false,
+    startLine: line.number,
+    endLine: line.number,
+    text: line.text,
+    readOnly,
+  };
+}
+
+function selectedTextForClipboard(view: EditorView): string {
+  const { state } = view;
+  return state.selection.ranges
+    .filter((r) => !r.empty)
+    .map((r) => state.sliceDoc(r.from, r.to))
+    .join(state.lineBreak);
+}
+
+export async function editorCopy(view: EditorView): Promise<void> {
+  const text = selectedTextForClipboard(view);
+  if (text) {
+    await navigator.clipboard.writeText(text).catch(() => undefined);
+  }
+  view.focus();
+}
+
+export async function editorCut(view: EditorView): Promise<void> {
+  if (view.state.readOnly) return;
+  const text = selectedTextForClipboard(view);
+  if (!text) {
+    view.focus();
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    view.focus();
+    return;
+  }
+  view.dispatch({
+    ...view.state.replaceSelection(""),
+    scrollIntoView: true,
+    userEvent: "delete.cut",
+  });
+  view.focus();
+}
+
+export async function editorPaste(view: EditorView): Promise<void> {
+  if (view.state.readOnly) return;
+  try {
+    const text = await navigator.clipboard.readText();
+    if (text) {
+      view.dispatch({
+        ...view.state.replaceSelection(text),
+        scrollIntoView: true,
+        userEvent: "input.paste",
+      });
+    }
+  } catch {
+    // Ignore clipboard read denials or non-text clipboard contents.
+  }
+  view.focus();
+}
+
+export function editorSelectAll(view: EditorView): void {
+  selectAll(view);
   view.focus();
 }
 

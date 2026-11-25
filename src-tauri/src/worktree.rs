@@ -283,6 +283,45 @@ pub fn merge(sb: &Sandbox, result: &str, list: &[Change], task_id: &str) -> Resu
     Ok(outcome)
 }
 
+/// A new base commit: the current base plus the task's version of `done` (files
+/// just merged into the workspace). Moving the base there with `set_base` makes
+/// later `changes` list only what is still unmerged.
+pub fn advance_base(sb: &Sandbox, result: &str, done: &[Change], label: &str) -> Result<String, String> {
+    let index = std::env::temp_dir().join(format!("baton-index-{}-{label}-base", std::process::id()));
+    let _ = std::fs::remove_file(&index);
+    let built = (|| {
+        let with_index = |args: &[&str]| -> Result<String, String> {
+            let mut cmd = git(&sb.repo);
+            cmd.env("GIT_INDEX_FILE", &index).args(args);
+            run_text(&mut cmd)
+        };
+        with_index(&["read-tree", &sb.base])?;
+        for change in done {
+            // "<mode> <type> <object>\t<path>", or nothing if the task deleted it.
+            let entry = run_text(git(&sb.repo).env("GIT_LITERAL_PATHSPECS", "1").args(["ls-tree", result, "--", &change.path]))?;
+            let mut fields = entry.lines().next().unwrap_or_default().split('\t').next().unwrap_or_default().split_whitespace();
+            match (fields.next(), fields.nth(1)) {
+                (Some(mode), Some(object)) => {
+                    with_index(&["update-index", "--add", "--cacheinfo", &format!("{mode},{object},{}", change.path)])?
+                }
+                _ => with_index(&["update-index", "--force-remove", "--", &change.path])?,
+            };
+        }
+        let tree = with_index(&["write-tree"])?;
+        run_text(git(&sb.repo).args(["commit-tree", &tree, "-p", &sb.base, "-m", &format!("baton snapshot {label}-base")]))
+    })();
+    let _ = std::fs::remove_file(&index);
+    built
+}
+
+/// Make `base` (from `advance_base`) the worktree's base and HEAD, so result
+/// snapshots, their diffs and a leftover patch all start from it. The working
+/// files are left as they are.
+pub fn set_base(sb: &mut Sandbox, base: String) {
+    let _ = run(git(&sb.path).args(["reset", "-q", "--mixed", &base]));
+    sb.base = base;
+}
+
 /// Delete the worktree folder and its git bookkeeping.
 pub fn remove(sb: &Sandbox) {
     // Unlink shared folders first so nothing can follow them on delete.
@@ -502,11 +541,28 @@ fn unlink(sb: &Sandbox) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    fn sh(dir: &Path, args: &[&str]) {
+    pub(crate) fn sh(dir: &Path, args: &[&str]) {
         assert!(Command::new("git").arg("-C").arg(dir).args(args).status().unwrap().success());
+    }
+
+    /// `<temp>/baton-<name>-<pid>/repo` with `files` committed (LF kept on
+    /// disk); returns (root, repo). The root also holds worktrees; delete it after.
+    pub(crate) fn test_repo(name: &str, files: &[(&str, &str)]) -> (PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!("baton-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        sh(&repo, &["init", "-q"]);
+        sh(&repo, &["config", "core.autocrlf", "false"]);
+        for (path, text) in files {
+            std::fs::write(repo.join(path), text).unwrap();
+        }
+        sh(&repo, &["add", "."]);
+        sh(&repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init"]);
+        (root, repo)
     }
 
     fn patch_repo(name: &str) -> (PathBuf, PathBuf) {

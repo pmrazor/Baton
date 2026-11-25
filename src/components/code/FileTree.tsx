@@ -171,7 +171,7 @@ function pruneCacheAfterDelete(cache: TreeCache, root: string, path: string): vo
   }
 }
 
-function FileIcon({ path }: { path: string }) {
+export function FileIcon({ path }: { path: string }) {
   const lang = languageForPath(path);
   if (lang === "json") return <FileJson size={14} className="code-tree-icon" />;
   if (lang === "markdown") return <FileText size={14} className="code-tree-icon" />;

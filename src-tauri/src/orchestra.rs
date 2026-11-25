@@ -57,7 +57,8 @@ You can hand work to team members with the baton tools:
   File-writing tasks depend on the team's isolation (see list_agents):
   - \"worktree\": each runs in parallel in its own copy of the workspace. Its changes reach the workspace only when you
     call merge_task, so review them first (the report lists changed files and the copy's path), merge accepted tasks
-    one at a time, fix any conflicts merge_task reports, and discard_task the rest.
+    one at a time, fix any conflicts merge_task reports, and discard_task the rest. To keep only some of a task's
+    files, pass them in merge_task's files; the rest stay in the worktree for a later merge_task or discard_task.
   - \"shared\": they run one at a time directly in the workspace.
 - Use wait to collect results, then check and integrate them before answering.
 - Files the user attached are listed after their message; pass the ones a member needs in delegate's attachments.
@@ -133,6 +134,9 @@ pub struct TaskInfo {
     /// none | pending | merged | conflict | discarded; isolated tasks only.
     pub merge_state: Option<String>,
     pub conflicts: Vec<String>,
+    /// Files already brought into the workspace by partial merges (conflicted
+    /// ones included); `changes` then lists only what is left.
+    pub merged: Vec<String>,
     /// Member switches after a limit error, e.g. "a → b (usage limit)".
     pub reassigned: Vec<String>,
     /// True when the task ended or was moved because of a usage limit.
@@ -553,6 +557,7 @@ impl Orchestra {
             changes: Vec::new(),
             merge_state: None,
             conflicts: Vec::new(),
+            merged: Vec::new(),
             reassigned: Vec::new(),
             limit_hit: false,
         };
@@ -639,6 +644,7 @@ impl Orchestra {
             "isolated": task.info.isolated,
             "worktree_path": task.sandbox.as_ref().map(|s| s.path.display().to_string()),
             "changed_files": task.info.changes,
+            "merged_files": task.info.merged,
             "merge_state": task.info.merge_state,
             "conflicts": task.info.conflicts,
         });
@@ -674,43 +680,65 @@ impl Orchestra {
         }
     }
 
-    /// Bring an isolated task's changes into the workspace and drop its worktree.
-    pub async fn merge(&self, id: &str) -> Result<Value, String> {
-        let sandbox = {
-            let tasks = self.tasks.lock().unwrap();
-            let task = tasks.get(id).ok_or("unknown task")?;
-            if !Self::is_terminal(&task.info.status) {
-                return Err("task is still running".into());
-            }
-            task.sandbox.clone().ok_or("nothing to merge: the task has no worktree (shared, merged or discarded)")?
-        };
-        // Shells first: on Windows a shell inside the worktree keeps it from being deleted.
-        self.close_terminals_under(sandbox.path.clone()).await;
+    /// Bring an isolated task's changes into the workspace: all of them, or
+    /// only `files`. The worktree is removed once nothing is left to merge.
+    pub async fn merge(&self, id: &str, files: Option<Vec<String>>) -> Result<Value, String> {
+        let sandbox = self.sandbox_of(id, true)?;
         let label = format!("{id}-merge");
+        let (sb, l) = (sandbox.clone(), label.clone());
+        let plan = tokio::task::spawn_blocking(move || plan_merge(&sb, &l, files.as_deref()))
+            .await
+            .map_err(|e| e.to_string())??;
+        if plan.remaining.is_empty() {
+            // Shells first: on Windows a shell inside the worktree keeps it from being deleted.
+            self.close_terminals_under(sandbox.path.clone()).await;
+        }
         let task_id = id.to_string();
-        let sb = sandbox.clone();
-        let outcome = tokio::task::spawn_blocking(move || -> Result<worktree::MergeOutcome, String> {
-            let (result, list) = worktree::changes(&sb, &label)?;
-            let outcome = worktree::merge(&sb, &result, &list, &task_id)?;
-            worktree::remove(&sb);
-            Ok(outcome)
-        })
-        .await
-        .map_err(|e| e.to_string())??;
+        let step = tokio::task::spawn_blocking(move || apply_merge(&sandbox, &task_id, &label, plan))
+            .await
+            .map_err(|e| e.to_string())??;
         if let Some(task) = self.tasks.lock().unwrap().get_mut(id) {
-            task.sandbox = None;
-            task.info.conflicts = outcome.conflicts.clone();
-            task.info.merge_state = Some(if outcome.conflicts.is_empty() { "merged" } else { "conflict" }.into());
+            record_merge(task, &step);
         }
         self.emit_task(id);
+        let kept = step.sandbox.is_some();
+        let mut note = match (kept, step.outcome.conflicts.is_empty()) {
+            (false, true) => "All changes are in the workspace.".to_string(),
+            (true, true) => "The chosen files are in the workspace.".to_string(),
+            (_, false) => "Conflicting text files now contain <<<<<<< markers (binary files kept the workspace version); resolve them in the workspace.".to_string(),
+        };
+        if kept {
+            note.push_str(&format!(
+                " {} changed file(s) are still only in the worktree: merge_task again (all, or with files) or discard_task the rest.",
+                step.remaining.len()
+            ));
+        }
         Ok(json!({
             "task_id": id,
-            "merged_files": outcome.merged,
-            "conflicts": outcome.conflicts,
-            "note": if outcome.conflicts.is_empty() { "All changes are in the workspace." } else {
-                "Conflicting text files now contain <<<<<<< markers (binary files kept the workspace version); resolve them in the workspace."
-            },
+            "merged_files": step.outcome.merged,
+            "conflicts": step.outcome.conflicts,
+            "remaining_files": step.remaining.iter().map(change_line).collect::<Vec<_>>(),
+            "worktree_kept": kept,
+            "note": note,
         }))
+    }
+
+    /// The task's unmerged changes, snapshotted into a result commit whose
+    /// parent is the worktree's base (so a commit diff shows base → task).
+    pub async fn task_changes(&self, id: &str) -> Result<Value, String> {
+        let sb = self.sandbox_of(id, false)?;
+        let label = format!("{id}-view{}", now_ms());
+        tokio::task::spawn_blocking(move || changes_report(&sb, &label)).await.map_err(|e| e.to_string())?
+    }
+
+    /// The task's worktree; with `finished`, only once the task stopped running.
+    fn sandbox_of(&self, id: &str, finished: bool) -> Result<Sandbox, String> {
+        let tasks = self.tasks.lock().unwrap();
+        let task = tasks.get(id).ok_or("unknown task")?;
+        if finished && !Self::is_terminal(&task.info.status) {
+            return Err("task is still running".into());
+        }
+        task.sandbox.clone().ok_or_else(|| "the task has no worktree (shared, already merged or discarded)".into())
     }
 
     /// Drop an isolated task's worktree without merging.
@@ -725,10 +753,7 @@ impl Orchestra {
             let _ = tokio::task::spawn_blocking(move || worktree::remove(&sb)).await;
         }
         if let Some(task) = self.tasks.lock().unwrap().get_mut(id) {
-            task.sandbox = None;
-            if task.info.isolated {
-                task.info.merge_state = Some("discarded".into());
-            }
+            record_discard(task);
         }
         self.emit_task(id);
         Ok(json!({ "task_id": id, "merge_state": "discarded" }))
@@ -757,7 +782,7 @@ impl Orchestra {
             }
             "merge_task" => {
                 let id = args.get("task_id").and_then(Value::as_str).ok_or("task_id is required")?;
-                self.merge(id).await
+                self.merge(id, merge_files_arg(args)?).await
             }
             "discard_task" => {
                 let id = args.get("task_id").and_then(Value::as_str).ok_or("task_id is required")?;
@@ -765,6 +790,119 @@ impl Orchestra {
             }
             other => Err(format!("unknown tool '{other}'")),
         }
+    }
+}
+
+/// "M src/a.rs", as listed in `TaskInfo::changes`.
+fn change_line(c: &worktree::Change) -> String {
+    format!("{} {}", c.status, c.path)
+}
+
+/// merge_task's optional `files`: absent or null merges everything.
+fn merge_files_arg(args: &Value) -> Result<Option<Vec<String>>, String> {
+    match args.get("files") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|v| v.as_str().map(str::to_owned).ok_or_else(|| "files must be an array of paths".to_string()))
+            .collect::<Result<Vec<_>, _>>()
+            .map(Some),
+        Some(_) => Err("files must be an array of paths".into()),
+    }
+}
+
+/// `{ result, files: [{ status, path }] }` for the task's worktree now.
+fn changes_report(sb: &Sandbox, label: &str) -> Result<Value, String> {
+    let (result, files) = worktree::changes(sb, label)?;
+    Ok(json!({ "result": result, "files": files }))
+}
+
+/// What a merge will take from the worktree, decided before anything is written.
+struct MergePlan {
+    result: String,
+    picked: Vec<worktree::Change>,
+    /// Changes that stay in the worktree afterwards.
+    remaining: Vec<worktree::Change>,
+}
+
+/// What one merge did.
+struct MergeStep {
+    outcome: worktree::MergeOutcome,
+    remaining: Vec<worktree::Change>,
+    /// The worktree with its base moved past the merged files; None once removed.
+    sandbox: Option<Sandbox>,
+}
+
+/// Snapshot the worktree and pick every change, or just `files` (each must be
+/// one of the unmerged changes).
+fn plan_merge(sb: &Sandbox, label: &str, files: Option<&[String]>) -> Result<MergePlan, String> {
+    let (result, list) = worktree::changes(sb, label)?;
+    let Some(files) = files else { return Ok(MergePlan { result, picked: list, remaining: Vec::new() }) };
+    if files.is_empty() {
+        return Err("files is empty: list the paths to merge, or leave files out to merge everything".into());
+    }
+    let unknown: Vec<&str> =
+        files.iter().filter(|f| !list.iter().any(|c| &c.path == *f)).map(String::as_str).collect();
+    if !unknown.is_empty() {
+        return Err(format!("not among the task's unmerged changes: {}", unknown.join(", ")));
+    }
+    let (picked, remaining) = list.into_iter().partition(|c| files.contains(&c.path));
+    Ok(MergePlan { result, picked, remaining })
+}
+
+/// Merge the picked files into the workspace. With nothing left the worktree
+/// is removed; otherwise its base moves past the merged files.
+fn apply_merge(sb: &Sandbox, task_id: &str, label: &str, plan: MergePlan) -> Result<MergeStep, String> {
+    // Built before the workspace is touched, so a failure leaves nothing half done.
+    let next_base =
+        if plan.remaining.is_empty() { None } else { Some(worktree::advance_base(sb, &plan.result, &plan.picked, label)?) };
+    let outcome = worktree::merge(sb, &plan.result, &plan.picked, task_id)?;
+    let sandbox = match next_base {
+        None => {
+            worktree::remove(sb);
+            None
+        }
+        Some(base) => {
+            let mut kept = sb.clone();
+            worktree::set_base(&mut kept, base);
+            Some(kept)
+        }
+    };
+    Ok(MergeStep { outcome, remaining: plan.remaining, sandbox })
+}
+
+/// Note a merge on the task. Conflicts add up over partial merges, since the
+/// workspace keeps their markers until someone resolves them.
+fn record_merge(task: &mut Task, step: &MergeStep) {
+    task.sandbox = step.sandbox.clone();
+    let info = &mut task.info;
+    for path in step.outcome.merged.iter().chain(&step.outcome.conflicts) {
+        if !info.merged.contains(path) {
+            info.merged.push(path.clone());
+        }
+    }
+    for path in &step.outcome.conflicts {
+        if !info.conflicts.contains(path) {
+            info.conflicts.push(path.clone());
+        }
+    }
+    info.changes = step.remaining.iter().map(change_line).collect();
+    let state = if !info.conflicts.is_empty() {
+        "conflict"
+    } else if step.sandbox.is_some() {
+        "pending"
+    } else {
+        "merged"
+    };
+    info.merge_state = Some(state.into());
+}
+
+/// Note a discard on the task. `changes` keeps what was thrown away; files
+/// merged earlier stay in the workspace.
+fn record_discard(task: &mut Task) {
+    task.sandbox = None;
+    if task.info.isolated {
+        task.info.merge_state = Some("discarded".into());
     }
 }
 
@@ -945,7 +1083,7 @@ async fn run_turn(app: AppHandle, token: String, task_id: String, message: Strin
         let label = format!("{task_id}-r{}", now_ms());
         if let Ok(Ok((_, list))) = tokio::task::spawn_blocking(move || worktree::changes(&sb, &label)).await {
             if let Some(t) = orch.tasks.lock().unwrap().get_mut(&task_id) {
-                t.info.changes = list.iter().map(|c| format!("{} {}", c.status, c.path)).collect();
+                t.info.changes = list.iter().map(change_line).collect();
                 t.info.merge_state = Some(if list.is_empty() { "none" } else { "pending" }.into());
             }
         }
@@ -1348,8 +1486,15 @@ fn tool_list() -> Value {
         },
         {
             "name": "merge_task",
-            "description": "Bring a finished worktree task's changes into the workspace (three-way, file by file) and remove its worktree. Reports merged files and conflicts.",
-            "inputSchema": { "type": "object", "properties": { "task_id": { "type": "string" } }, "required": ["task_id"] }
+            "description": "Bring a finished worktree task's changes into the workspace (three-way, file by file) and remove its worktree. Pass files to merge only some of them: the worktree then stays with the rest. Reports merged files, conflicts and what is left.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string" },
+                    "files": { "type": "array", "items": { "type": "string" }, "description": "Repo-relative paths from the task's changed_files to merge now. Leave out to merge everything left." }
+                },
+                "required": ["task_id"]
+            }
         },
         {
             "name": "discard_task",
@@ -1691,6 +1836,9 @@ mod tests {
             assert_eq!(tool["inputSchema"]["type"], "object", "{}", tool["name"]);
             assert!(!tool["description"].as_str().unwrap().is_empty());
         }
+        let merge = tools.as_array().unwrap().iter().find(|t| t["name"] == "merge_task").unwrap();
+        assert_eq!(merge["inputSchema"]["properties"]["files"]["type"], "array");
+        assert_eq!(merge["inputSchema"]["required"], json!(["task_id"]));
         for name in ["delegate", "send_followup"] {
             let tool = tools.as_array().unwrap().iter().find(|t| t["name"] == name).unwrap();
             let schema = &tool["inputSchema"];
@@ -1700,50 +1848,236 @@ mod tests {
         }
     }
 
+    fn test_task(id: &str, lead_agent: &str, lead_session: &str) -> Task {
+        let member: Member =
+            serde_json::from_value(json!({ "id": "m1", "name": "Member", "agentId": "dsh" })).unwrap();
+        Task {
+            info: TaskInfo {
+                id: id.into(),
+                lead_agent_id: lead_agent.into(),
+                lead_session_id: lead_session.into(),
+                title: format!("Task {id}"),
+                member_id: member.id.clone(),
+                member_name: member.name.clone(),
+                agent_id: member.agent_id.clone(),
+                session_id: Some(format!("sub-{id}")),
+                status: "running".into(),
+                writes: true,
+                started_at: Some(100),
+                ended_at: None,
+                error: None,
+                isolated: true,
+                changes: Vec::new(),
+                merge_state: None,
+                conflicts: Vec::new(),
+                merged: Vec::new(),
+                reassigned: Vec::new(),
+                limit_hit: false,
+            },
+            member,
+            cwd: "/work".into(),
+            result: String::new(),
+            answer: String::new(),
+            after_tool: false,
+            notes: Vec::new(),
+            cancel_requested: false,
+            sandbox: None,
+            attachments: Vec::new(),
+        }
+    }
+
+    /// A finished isolated task on a fresh worktree that changed a.txt and
+    /// b.txt, deleted c.txt and added d.txt. Returns (root, repo, task).
+    fn partial_setup(name: &str) -> (std::path::PathBuf, std::path::PathBuf, Task) {
+        let files = [("a.txt", "a1\na2\na3\n"), ("b.txt", "b1\nb2\nb3\n"), ("c.txt", "c\n")];
+        let (root, repo) = crate::worktree::tests::test_repo(name, &files);
+        let sb = worktree::create(&repo, &root.join("wts"), name).unwrap();
+        std::fs::write(sb.path.join("a.txt"), "A1\na2\na3\n").unwrap();
+        std::fs::write(sb.path.join("b.txt"), "B1\nb2\nb3\n").unwrap();
+        std::fs::remove_file(sb.path.join("c.txt")).unwrap();
+        std::fs::write(sb.path.join("d.txt"), "new\n").unwrap();
+        let mut task = test_task(name, "claude", "lead");
+        task.info.status = "done".into();
+        task.info.changes = vec!["M a.txt".into(), "M b.txt".into(), "D c.txt".into(), "A d.txt".into()];
+        task.info.merge_state = Some("pending".into());
+        task.sandbox = Some(sb);
+        (root, repo, task)
+    }
+
+    fn merge_into(task: &mut Task, files: Option<&[&str]>) -> Result<(), String> {
+        let sb = task.sandbox.clone().unwrap();
+        let files: Option<Vec<String>> = files.map(|f| f.iter().map(|p| p.to_string()).collect());
+        // Labels name temp index files: keep them apart across parallel tests.
+        let label = format!("{}-merge", task.info.id);
+        let plan = plan_merge(&sb, &label, files.as_deref())?;
+        let step = apply_merge(&sb, &task.info.id, &label, plan)?;
+        record_merge(task, &step);
+        Ok(())
+    }
+
+    fn read(repo: &std::path::Path, path: &str) -> Option<String> {
+        std::fs::read_to_string(repo.join(path)).ok()
+    }
+
+    #[test]
+    fn partial_merges_keep_the_worktree_until_nothing_is_left() {
+        let (root, repo, mut task) = partial_setup("pm-keep");
+        let path = task.sandbox.as_ref().unwrap().path.clone();
+
+        merge_into(&mut task, Some(&["a.txt"])).unwrap();
+        assert_eq!(read(&repo, "a.txt").as_deref(), Some("A1\na2\na3\n"));
+        assert_eq!(read(&repo, "b.txt").as_deref(), Some("b1\nb2\nb3\n"), "unpicked files stay as they were");
+        assert!(read(&repo, "c.txt").is_some() && read(&repo, "d.txt").is_none());
+        assert!(task.sandbox.is_some() && path.exists(), "the worktree stays for the rest");
+        assert_eq!(task.info.changes, ["M b.txt", "D c.txt", "A d.txt"]);
+        assert_eq!(task.info.merged, ["a.txt"]);
+        assert_eq!(task.info.merge_state.as_deref(), Some("pending"));
+
+        merge_into(&mut task, Some(&["b.txt", "c.txt"])).unwrap();
+        assert_eq!(read(&repo, "b.txt").as_deref(), Some("B1\nb2\nb3\n"));
+        assert!(read(&repo, "c.txt").is_none(), "the deletion is merged");
+        assert!(task.sandbox.is_some() && path.exists());
+        assert_eq!(task.info.changes, ["A d.txt"]);
+        assert_eq!(task.info.merged, ["a.txt", "b.txt", "c.txt"]);
+
+        merge_into(&mut task, Some(&["d.txt"])).unwrap();
+        assert_eq!(read(&repo, "d.txt").as_deref(), Some("new\n"));
+        assert!(task.sandbox.is_none() && !path.exists(), "merging the last file removes the worktree");
+        assert!(task.info.changes.is_empty());
+        assert_eq!(task.info.merged, ["a.txt", "b.txt", "c.txt", "d.txt"]);
+        assert_eq!(task.info.merge_state.as_deref(), Some("merged"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn merge_all_after_a_partial_merge_takes_the_rest() {
+        let (root, repo, mut task) = partial_setup("pm-rest");
+        merge_into(&mut task, Some(&["a.txt"])).unwrap();
+        // The user edits a merged file afterwards: merging the rest must not touch it.
+        std::fs::write(repo.join("a.txt"), "user\n").unwrap();
+        merge_into(&mut task, None).unwrap();
+        assert_eq!(read(&repo, "a.txt").as_deref(), Some("user\n"));
+        assert_eq!(read(&repo, "b.txt").as_deref(), Some("B1\nb2\nb3\n"));
+        assert!(read(&repo, "c.txt").is_none());
+        assert_eq!(read(&repo, "d.txt").as_deref(), Some("new\n"));
+        assert!(task.sandbox.is_none());
+        assert_eq!(task.info.merge_state.as_deref(), Some("merged"));
+        assert!(task.info.conflicts.is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn partial_merge_rejects_unknown_and_already_merged_paths() {
+        let (root, repo, mut task) = partial_setup("pm-unknown");
+        let sb = task.sandbox.clone().unwrap();
+        let err = plan_merge(&sb, "pm-unknown-plan", Some(&["a.txt".into(), "nope.txt".into()])).err().unwrap();
+        assert!(err.contains("nope.txt") && !err.contains("a.txt"), "{err}");
+        assert!(plan_merge(&sb, "pm-unknown-plan", Some(&[])).is_err());
+        assert_eq!(read(&repo, "a.txt").as_deref(), Some("a1\na2\na3\n"), "nothing is merged on a bad list");
+
+        merge_into(&mut task, Some(&["a.txt"])).unwrap();
+        let err = merge_into(&mut task, Some(&["a.txt"])).unwrap_err();
+        assert!(err.contains("a.txt"), "{err}");
+        assert_eq!(task.info.changes.len(), 3);
+
+        assert_eq!(merge_files_arg(&json!({ "task_id": "t" })), Ok(None));
+        assert_eq!(merge_files_arg(&json!({ "files": null })), Ok(None));
+        assert_eq!(merge_files_arg(&json!({ "files": ["a.txt"] })), Ok(Some(vec!["a.txt".into()])));
+        assert!(merge_files_arg(&json!({ "files": "a.txt" })).is_err());
+        assert!(merge_files_arg(&json!({ "files": [1] })).is_err());
+        remove_sandbox(&mut task);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn remove_sandbox(task: &mut Task) {
+        if let Some(sb) = task.sandbox.take() {
+            worktree::remove(&sb);
+        }
+    }
+
+    #[test]
+    fn discard_after_a_partial_merge_drops_only_the_rest() {
+        let (root, repo, mut task) = partial_setup("pm-discard");
+        merge_into(&mut task, Some(&["d.txt"])).unwrap();
+        let sb = task.sandbox.clone().unwrap();
+        worktree::remove(&sb);
+        record_discard(&mut task);
+        assert!(!sb.path.exists() && task.sandbox.is_none());
+        assert_eq!(task.info.merge_state.as_deref(), Some("discarded"));
+        assert_eq!(task.info.changes, ["M a.txt", "M b.txt", "D c.txt"], "what was thrown away");
+        assert_eq!(read(&repo, "d.txt").as_deref(), Some("new\n"), "the merged file stays");
+        assert_eq!(read(&repo, "a.txt").as_deref(), Some("a1\na2\na3\n"));
+        assert!(read(&repo, "c.txt").is_some());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn partial_merge_conflicts_are_kept_across_merges() {
+        let (root, repo, mut task) = partial_setup("pm-conflict");
+        std::fs::write(repo.join("b.txt"), "WS\nb2\nb3\n").unwrap();
+        merge_into(&mut task, Some(&["b.txt"])).unwrap();
+        assert!(read(&repo, "b.txt").unwrap().contains("<<<<<<<"));
+        assert!(task.sandbox.is_some());
+        assert_eq!(task.info.conflicts, ["b.txt"]);
+        assert_eq!(task.info.merged, ["b.txt"]);
+        assert_eq!(task.info.merge_state.as_deref(), Some("conflict"));
+        assert_eq!(task.info.changes, ["M a.txt", "D c.txt", "A d.txt"]);
+
+        merge_into(&mut task, None).unwrap();
+        assert!(task.sandbox.is_none());
+        assert_eq!(task.info.conflicts, ["b.txt"], "its markers are still in the workspace");
+        assert_eq!(task.info.merge_state.as_deref(), Some("conflict"));
+        assert!(read(&repo, "b.txt").unwrap().contains("<<<<<<<"), "a merged file is not merged twice");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn task_changes_lists_whats_left_against_the_moved_base() {
+        let (root, repo, mut task) = partial_setup("pm-view");
+        let sb = task.sandbox.clone().unwrap();
+        let report = changes_report(&sb, "pm-view-list").unwrap();
+        assert_eq!(
+            report["files"],
+            json!([
+                { "status": "M", "path": "a.txt" },
+                { "status": "M", "path": "b.txt" },
+                { "status": "D", "path": "c.txt" },
+                { "status": "A", "path": "d.txt" },
+            ])
+        );
+        let result = report["result"].as_str().unwrap().to_string();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git").arg("-C").arg(&repo).args(args).output().unwrap();
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
+        assert_eq!(git(&["rev-parse", &format!("{result}^1")]), sb.base, "a commit diff shows base → task");
+
+        merge_into(&mut task, Some(&["a.txt", "c.txt"])).unwrap();
+        let sb = task.sandbox.clone().unwrap();
+        let report = changes_report(&sb, "pm-view-list").unwrap();
+        assert_eq!(report["files"], json!([{ "status": "M", "path": "b.txt" }, { "status": "A", "path": "d.txt" }]));
+        let result = report["result"].as_str().unwrap();
+        assert_eq!(git(&["rev-parse", &format!("{result}^1")]), sb.base);
+        assert_eq!(git(&["diff", "--name-only", &format!("{result}^1"), result]), "b.txt\nd.txt");
+
+        // A follow-up turn edits a merged file again: it shows up as a change once more.
+        std::fs::write(sb.path.join("a.txt"), "A1\na2\nA3\n").unwrap();
+        let report = changes_report(&sb, "pm-view-list").unwrap();
+        assert_eq!(report["files"][0], json!({ "status": "M", "path": "a.txt" }));
+        merge_into(&mut task, Some(&["a.txt"])).unwrap();
+        assert_eq!(read(&repo, "a.txt").as_deref(), Some("A1\na2\nA3\n"), "merged against the moved base, no conflict");
+        assert!(task.info.conflicts.is_empty());
+        remove_sandbox(&mut task);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn handoff_reassigns_only_matching_lead_tasks() {
-        let make_task = |id: &str, lead_agent: &str, lead_session: &str| {
-            let member: Member =
-                serde_json::from_value(json!({ "id": "m1", "name": "Member", "agentId": "dsh" })).unwrap();
-            Task {
-                info: TaskInfo {
-                    id: id.into(),
-                    lead_agent_id: lead_agent.into(),
-                    lead_session_id: lead_session.into(),
-                    title: format!("Task {id}"),
-                    member_id: member.id.clone(),
-                    member_name: member.name.clone(),
-                    agent_id: member.agent_id.clone(),
-                    session_id: Some(format!("sub-{id}")),
-                    status: "running".into(),
-                    writes: true,
-                    started_at: Some(100),
-                    ended_at: None,
-                    error: None,
-                    isolated: true,
-                    changes: Vec::new(),
-                    merge_state: None,
-                    conflicts: Vec::new(),
-                    reassigned: Vec::new(),
-                    limit_hit: false,
-                },
-                member,
-                cwd: "/work".into(),
-                result: String::new(),
-                answer: String::new(),
-                after_tool: false,
-                notes: Vec::new(),
-                cancel_requested: false,
-                sandbox: None,
-                attachments: Vec::new(),
-            }
-        };
-
         let mut tasks = HashMap::from([
-            ("t1".into(), make_task("t1", "claude", "old")),
-            ("t2".into(), make_task("t2", "claude", "old")),
-            ("t3".into(), make_task("t3", "claude", "other")),
-            ("t4".into(), make_task("t4", "codex", "old")),
+            ("t1".into(), test_task("t1", "claude", "old")),
+            ("t2".into(), test_task("t2", "claude", "old")),
+            ("t3".into(), test_task("t3", "claude", "other")),
+            ("t4".into(), test_task("t4", "codex", "old")),
         ]);
 
         let moved = Orchestra::reassign_tasks(&mut tasks, "claude", "old", "codex", "new");
@@ -1780,6 +2114,7 @@ mod tests {
             changes: Vec::new(),
             merge_state: Some("none".into()),
             conflicts: Vec::new(),
+            merged: Vec::new(),
             reassigned: vec!["claude-opus-5-5 → antigravity-claude-opus-5-5 (usage limit)".into()],
             limit_hit: true,
         };

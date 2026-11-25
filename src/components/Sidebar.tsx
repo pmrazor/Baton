@@ -20,7 +20,7 @@ import {
 } from "lucide-react";
 import { isTaskActive, sessionKey, type AgentInfo, type PermissionRequest, type Session, type Team } from "../types";
 import type { ProViewId, UiMode } from "./proLayoutState";
-import { taskLabel, taskTone, TeamsContext } from "./taskLabels";
+import { canReviewChanges, taskLabel, taskTone, TeamsContext } from "./taskLabels";
 import logo from "../assets/logo.png";
 
 export interface ProRailViewItem {
@@ -216,7 +216,11 @@ export default function Sidebar(p: Props) {
                           <div className="session-row child done-toggle">
                             <button
                               className="session-main"
-                              onClick={() => setShowDone((o) => ({ ...o, [s.key]: !open }))}
+                              onClick={() => {
+                                // Folding away the task being viewed goes back to its lead.
+                                if (open && finished.some((c) => c.key === p.activeKey)) p.onActivate(s.key);
+                                setShowDone((o) => ({ ...o, [s.key]: !open }));
+                              }}
                             >
                               {open ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
                               <span className="ellipsis">완료된 작업 {finished.length}개</span>
@@ -249,7 +253,7 @@ export default function Sidebar(p: Props) {
 function splitTasks(lead: Session, children: Session[], waiting: Set<string>) {
   const inPlay = (c: Session) => {
     const task = lead.tasks?.find((t) => t.id === c.parent?.taskId);
-    return waiting.has(c.key) || c.busy || (!!task && (isTaskActive(task.status) || task.mergeState === "pending"));
+    return waiting.has(c.key) || c.busy || (!!task && (isTaskActive(task.status) || canReviewChanges(task)));
   };
   return { active: children.filter(inPlay), finished: children.filter((c) => !inPlay(c)) };
 }
@@ -387,7 +391,11 @@ export function Rail(p: RailProps) {
                           <button
                             className="rail-task rail-done-toggle"
                             aria-expanded={doneOpen}
-                            onClick={() => setShowDone((o) => ({ ...o, [c.key]: !doneOpen }))}
+                            onClick={() => {
+                              // Folding away the task being viewed goes back to its lead.
+                              if (doneOpen && finished.some((f) => f.key === p.activeKey)) p.onActivate(c.key);
+                              setShowDone((o) => ({ ...o, [c.key]: !doneOpen }));
+                            }}
                             {...tipFor(`완료된 작업 ${finished.length}개 ${doneOpen ? "접기" : "펼치기"}`)}
                           >
                             {doneOpen ? <ChevronUp size={13} /> : <ChevronDown size={13} />}

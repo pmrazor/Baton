@@ -568,6 +568,29 @@ function applyTask(state: State, task: TaskInfo): State {
       tasks: prev ? tasks.map((t) => (t.id === task.id ? merged : t)) : [...tasks, merged],
     };
   });
+  // A task moved to another member (usage limit) leaves its earlier chats
+  // behind; they no longer get status updates, so settle them here.
+  const current = task.sessionId ? sessionKey(task.agentId, task.sessionId) : null;
+  next = {
+    ...next,
+    sessions: next.sessions.map((s) =>
+      s.busy && s.key !== current && s.parent?.key === leadKey && s.parent.taskId === task.id
+        ? {
+            ...s,
+            busy: false,
+            items: [
+              ...stampTurnDuration(s.items),
+              {
+                kind: "notice",
+                id: nextId(),
+                tone: "info",
+                text: `사용 한도에 걸려 이 작업을 ${task.memberName}에게 넘겼어요.`,
+              },
+            ],
+          }
+        : s,
+    ),
+  };
   if (task.sessionId) {
     const running = task.status === "running";
     const finished = !isTaskActive(task.status);

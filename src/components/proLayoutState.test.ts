@@ -60,8 +60,9 @@ describe("sub-sidebar view toggling", () => {
     expect(toggleSubSidebar(null, "files")).toBe("files");
   });
 
-  it("exposes 파일 and 깃 in the view registry", () => {
-    expect(PRO_VIEWS.map((v) => v.id)).toEqual(["files", "git"]);
+  it("exposes 파일, 찾기 and 깃 in the view registry", () => {
+    expect(PRO_VIEWS.map((v) => v.id)).toEqual(["files", "search", "git"]);
+    expect(PRO_VIEWS.find((v) => v.id === "search")?.label).toBe("찾기");
     expect(PRO_VIEWS.find((v) => v.id === "git")?.label).toBe("깃");
   });
 

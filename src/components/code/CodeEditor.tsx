@@ -11,16 +11,22 @@ import {
 } from "lucide-react";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { api, toFsError, type FsError, type GitDiffTexts } from "../../api";
+import { attachToComposer, insertIntoComposer } from "../../composerBus";
 import ContextMenu from "../ContextMenu";
 import {
+  buildEditorMenuSections,
   buildEditorTabMenuSections,
   detectPlatform,
   diffTabLabel,
   fileName,
+  formatChatSnippet,
+  formatPathWithLines,
+  isSelectionTooLong,
   joinPath,
   shortHash,
   tabIdsToClose,
   type BulkCloseAction,
+  type EditorMenuActionId,
   type EditorTabMenuActionId,
 } from "./codeHelpers";
 import {
@@ -155,12 +161,25 @@ function getRuntime(key: string): TabRuntime {
   return rt;
 }
 
+interface EditorAreaMenuState {
+  x: number;
+  y: number;
+  view: CmEngineModule.EditorView;
+  relPath: string;
+  hasSelection: boolean;
+  hasLineContent: boolean;
+  readOnly: boolean;
+  startLine: number;
+  endLine: number;
+}
+
 export default function CodeEditor({ root }: CodeEditorProps) {
   const { tabs, active, jump } = useEditorRoot(root);
   const [, bump] = useState(0);
   const rerender = useCallback(() => bump((n) => n + 1), []);
   const [diffMode, setDiffMode] = useState<DiffViewMode>(readDiffViewMode);
   const [menu, setMenu] = useState<{ x: number; y: number; tabId: string } | null>(null);
+  const [editorMenu, setEditorMenu] = useState<EditorAreaMenuState | null>(null);
 
   const stripRef = useRef<HTMLDivElement>(null);
   const cmHostRef = useRef<HTMLDivElement>(null);
@@ -182,7 +201,12 @@ export default function CodeEditor({ root }: CodeEditorProps) {
   useEffect(() => {
     registerRoot(root);
     setMenu(null);
+    setEditorMenu(null);
   }, [root]);
+
+  useEffect(() => {
+    setEditorMenu(null);
+  }, [active, diffMode]);
 
   // Keep the active tab scrolled into view.
   useEffect(() => {
@@ -195,6 +219,8 @@ export default function CodeEditor({ root }: CodeEditorProps) {
     onDirtyChange: () => undefined,
     onSave: () => undefined,
     onChunksChange: () => undefined,
+    onAddToChat: () => undefined,
+    onContextMenu: () => undefined,
   });
 
   const reloadTabFromDisk = useCallback(
@@ -315,6 +341,8 @@ export default function CodeEditor({ root }: CodeEditorProps) {
           onDirtyChange: (ck, d) => diffCallbacksRef.current.onDirtyChange(ck, d),
           onSave: (ck) => diffCallbacksRef.current.onSave(ck),
           onChunksChange: (ck, c) => diffCallbacksRef.current.onChunksChange(ck, c),
+          onAddToChat: (ck, v) => diffCallbacksRef.current.onAddToChat?.(ck, v),
+          onContextMenu: (ck, v, x, y) => diffCallbacksRef.current.onContextMenu?.(ck, v, x, y),
         };
         const session = diffEngine.ensureDiffSession(
           k,
@@ -506,9 +534,66 @@ export default function CodeEditor({ root }: CodeEditorProps) {
     [reloadDiffTab, reloadTabFromDisk, rerender],
   );
 
+  const sendViewSelectionToChat = useCallback(
+    async (tabRoot: string, relPath: string, view: CmEngineModule.EditorView) => {
+      const ops = engineRef.current ?? diffEngineRef.current;
+      if (!ops) return;
+      const info = ops.extractEditorSelection(view);
+      if (!info.hasSelection && info.text.trim().length === 0) return;
+
+      if (isSelectionTooLong(info.text)) {
+        const attachWhole = await ask("선택한 코드가 길어요. 파일을 통째로 첨부할까요?", {
+          title: "채팅에 넣기",
+          kind: "info",
+          okLabel: "파일 첨부",
+          cancelLabel: "그래도 넣기",
+        });
+        if (attachWhole) {
+          attachToComposer([joinPath(tabRoot, relPath)]);
+          return;
+        }
+      }
+
+      insertIntoComposer(
+        formatChatSnippet({
+          relPath,
+          startLine: info.startLine,
+          endLine: info.endLine,
+          code: info.text,
+        }),
+      );
+    },
+    [],
+  );
+
+  const openEditorAreaMenu = useCallback(
+    (tabRoot: string, tabId: string, view: CmEngineModule.EditorView, x: number, y: number) => {
+      const ops = engineRef.current ?? diffEngineRef.current;
+      if (!ops) return;
+      const tab = getRootEditorView(tabRoot).tabs.find((t) => t.id === tabId);
+      if (!tab) return;
+      const info = ops.extractEditorSelection(view);
+      setMenu(null);
+      setEditorMenu({
+        x,
+        y,
+        view,
+        relPath: tab.path,
+        hasSelection: info.hasSelection,
+        hasLineContent: info.text.trim().length > 0,
+        readOnly: info.readOnly,
+        startLine: info.startLine,
+        endLine: info.endLine,
+      });
+    },
+    [],
+  );
+
   const callbacksRef = useRef<CmEngineModule.EngineCallbacks>({
     onDirtyChange: () => undefined,
     onSave: () => undefined,
+    onAddToChat: () => undefined,
+    onContextMenu: () => undefined,
   });
 
   callbacksRef.current = {
@@ -521,6 +606,19 @@ export default function CodeEditor({ root }: CodeEditorProps) {
       const sepIdx = k.indexOf("\0");
       if (sepIdx < 0) return;
       void saveTab(k.slice(0, sepIdx), k.slice(sepIdx + 1));
+    },
+    onAddToChat: (k, view) => {
+      const sepIdx = k.indexOf("\0");
+      if (sepIdx < 0) return;
+      const tabRoot = k.slice(0, sepIdx);
+      const tabId = k.slice(sepIdx + 1);
+      const tab = getRootEditorView(tabRoot).tabs.find((t) => t.id === tabId);
+      if (tab) void sendViewSelectionToChat(tabRoot, tab.path, view);
+    },
+    onContextMenu: (k, view, x, y) => {
+      const sepIdx = k.indexOf("\0");
+      if (sepIdx < 0) return;
+      openEditorAreaMenu(k.slice(0, sepIdx), k.slice(sepIdx + 1), view, x, y);
     },
   };
 
@@ -541,6 +639,19 @@ export default function CodeEditor({ root }: CodeEditorProps) {
         rt.chunkCount = count;
         rerender();
       }
+    },
+    onAddToChat: (k, view) => {
+      const sepIdx = k.indexOf("\0");
+      if (sepIdx < 0) return;
+      const tabRoot = k.slice(0, sepIdx);
+      const tabId = k.slice(sepIdx + 1);
+      const tab = getRootEditorView(tabRoot).tabs.find((t) => t.id === tabId);
+      if (tab) void sendViewSelectionToChat(tabRoot, tab.path, view);
+    },
+    onContextMenu: (k, view, x, y) => {
+      const sepIdx = k.indexOf("\0");
+      if (sepIdx < 0) return;
+      openEditorAreaMenu(k.slice(0, sepIdx), k.slice(sepIdx + 1), view, x, y);
     },
   };
 
@@ -594,6 +705,8 @@ export default function CodeEditor({ root }: CodeEditorProps) {
       const callbacks: CmEngineModule.EngineCallbacks = {
         onDirtyChange: (k, d) => callbacksRef.current.onDirtyChange(k, d),
         onSave: (k) => callbacksRef.current.onSave(k),
+        onAddToChat: (k, v) => callbacksRef.current.onAddToChat?.(k, v),
+        onContextMenu: (k, v, x, y) => callbacksRef.current.onContextMenu?.(k, v, x, y),
       };
 
       if (!cmViewRef.current) {
@@ -643,6 +756,8 @@ export default function CodeEditor({ root }: CodeEditorProps) {
         onDirtyChange: (k, d) => diffCallbacksRef.current.onDirtyChange(k, d),
         onSave: (k) => diffCallbacksRef.current.onSave(k),
         onChunksChange: (k, c) => diffCallbacksRef.current.onChunksChange(k, c),
+        onAddToChat: (k, v) => diffCallbacksRef.current.onAddToChat?.(k, v),
+        onContextMenu: (k, v, x, y) => diffCallbacksRef.current.onContextMenu?.(k, v, x, y),
       };
       diffEngine.mountDiffSession(host, session, diffMode, callbacks);
       mountedDiffKeyRef.current = activeKey;
@@ -864,6 +979,48 @@ export default function CodeEditor({ root }: CodeEditorProps) {
     });
   }, [menuTab, tabs]);
 
+  const editorMenuSections = useMemo(() => {
+    if (!editorMenu) return [];
+    return buildEditorMenuSections({
+      hasSelection: editorMenu.hasSelection,
+      hasLineContent: editorMenu.hasLineContent,
+      readOnly: editorMenu.readOnly,
+      platform: PLATFORM,
+    });
+  }, [editorMenu]);
+
+  const handleEditorMenuSelect = (action: EditorMenuActionId) => {
+    if (!editorMenu) return;
+    const ops = engineRef.current ?? diffEngineRef.current;
+    const { view, relPath, startLine, endLine } = editorMenu;
+    switch (action) {
+      case "addToChat":
+        void sendViewSelectionToChat(root, relPath, view);
+        return;
+      case "attachFile":
+        attachToComposer([joinPath(root, relPath)]);
+        return;
+      case "cut":
+        if (ops) void ops.editorCut(view);
+        return;
+      case "copy":
+        if (ops) void ops.editorCopy(view);
+        return;
+      case "paste":
+        if (ops) void ops.editorPaste(view);
+        return;
+      case "selectAll":
+        ops?.editorSelectAll(view);
+        return;
+      case "copyPathLine":
+        void navigator.clipboard
+          .writeText(formatPathWithLines(relPath, startLine, endLine))
+          .catch(() => undefined);
+        view.focus();
+        return;
+    }
+  };
+
   const handleTabMenuSelect = (action: EditorTabMenuActionId) => {
     if (!menu) return;
     const tab = getRootEditorView(root).tabs.find((t) => t.id === menu.tabId);
@@ -962,6 +1119,31 @@ export default function CodeEditor({ root }: CodeEditorProps) {
       }
       return;
     }
+    if (
+      !ev.defaultPrevented &&
+      (ev.metaKey || ev.ctrlKey) &&
+      !ev.altKey &&
+      !ev.shiftKey &&
+      ev.key.toLowerCase() === "l"
+    ) {
+      const target = ev.target as HTMLElement | null;
+      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) return;
+      if (activeTab) {
+        const view =
+          activeTab.kind === "diff"
+            ? activeKey && isDiffReady
+              ? (diffEngineRef.current?.getActiveDiffEditorView(activeKey) ?? null)
+              : null
+            : isNormalReady
+              ? cmViewRef.current
+              : null;
+        if (view) {
+          ev.preventDefault();
+          void sendViewSelectionToChat(root, activeTab.path, view);
+        }
+      }
+      return;
+    }
     if ((ev.metaKey || ev.ctrlKey) && !ev.altKey && !ev.shiftKey && ev.key.toLowerCase() === "w") {
       if (activeTab) {
         ev.preventDefault();
@@ -1046,6 +1228,7 @@ export default function CodeEditor({ root }: CodeEditorProps) {
               onContextMenu={(ev) => {
                 ev.preventDefault();
                 ev.stopPropagation();
+                setEditorMenu(null);
                 setMenu({ x: ev.clientX, y: ev.clientY, tabId: tab.id });
               }}
             >
@@ -1277,6 +1460,17 @@ export default function CodeEditor({ root }: CodeEditorProps) {
           ariaLabel="편집기 탭 메뉴"
           onSelect={handleTabMenuSelect}
           onClose={() => setMenu(null)}
+        />
+      )}
+
+      {editorMenu && (
+        <ContextMenu
+          x={editorMenu.x}
+          y={editorMenu.y}
+          sections={editorMenuSections}
+          ariaLabel="편집기 메뉴"
+          onSelect={handleEditorMenuSelect}
+          onClose={() => setEditorMenu(null)}
         />
       )}
     </div>

@@ -11,6 +11,7 @@ import type {
   PermissionRequest,
   Profile,
   SessionModes,
+  TaskChanges,
   TaskInfo,
   Team,
   UnmergedPatch,
@@ -64,6 +65,7 @@ export type FsErrorKind =
   | "too_large"
   | "binary"
   | "conflict"
+  | "invalid_query"
   | "io";
 
 export interface FsError {
@@ -77,6 +79,42 @@ export function toFsError(e: unknown): FsError {
     return { kind: String(err.kind) as FsErrorKind, message: String(err.message) };
   }
   return { kind: "io", message: String(e) };
+}
+
+export interface SearchOptions {
+  caseSensitive: boolean;
+  wholeWord: boolean;
+  regex: boolean;
+  /** Comma-separated globs such as `src/**, *.ts`; empty searches every file. */
+  include: string;
+  /** Comma-separated globs of files and folders to leave out. */
+  exclude: string;
+  /** Match cap; the backend defaults to 2000. */
+  maxResults?: number;
+}
+
+export interface SearchLineMatch {
+  /** 1-based line number. */
+  line: number;
+  /** 1-based column of the first match, in UTF-16 code units. */
+  column: number;
+  /** The line, trimmed around the match when long. */
+  preview: string;
+  /** `[start, end)` ranges inside `preview`, in UTF-16 code units. */
+  ranges: [number, number][];
+}
+
+export interface SearchFileMatches {
+  /** Relative to the searched root, `/`-separated. */
+  path: string;
+  matches: SearchLineMatch[];
+}
+
+export interface SearchResult {
+  files: SearchFileMatches[];
+  /** More matches exist than were returned. */
+  truncated: boolean;
+  searchedFiles: number;
 }
 
 /** One changed file in `git status`. Paths are relative to the repository root, `/`-separated. */
@@ -160,8 +198,13 @@ export const api = {
   switchMode: (agentId: string, sessionId: string, cwd: string, teamId: string | null) =>
     invoke<Omit<NewSessionResult, "sessionId">>("switch_mode", { agentId, sessionId, cwd, teamId }),
   missingPaths: (paths: string[]) => invoke<string[]>("missing_paths", { paths }),
-  mergeTask: (taskId: string) =>
-    invoke<{ merged_files: string[]; conflicts: string[] }>("merge_task", { taskId }),
+  /** Merge everything left, or only `files` (the worktree then keeps the rest). */
+  mergeTask: (taskId: string, files?: string[]) =>
+    invoke<{ merged_files: string[]; conflicts: string[]; remaining_files?: string[]; worktree_kept?: boolean }>(
+      "merge_task",
+      { taskId, files },
+    ),
+  taskChanges: (taskId: string) => invoke<TaskChanges>("task_changes", { taskId }),
   discardTask: (taskId: string) => invoke<void>("discard_task", { taskId }),
   setLeadTeam: (agentId: string, sessionId: string, teamId: string) =>
     invoke<void>("set_lead_team", { agentId, sessionId, teamId }),
@@ -225,6 +268,8 @@ export const api = {
   fsRename: (root: string, from: string, to: string) => invoke<void>("fs_rename", { root, from, to }),
   fsCopy: (root: string, from: string, toDir: string) => invoke<string>("fs_copy", { root, from, toDir }),
   fsTrash: (root: string, path: string) => invoke<void>("fs_trash", { root, path }),
+  searchText: (root: string, query: string, opts: SearchOptions) =>
+    invoke<SearchResult>("search_text", { root, query, opts }),
   /** Git commands take any folder inside the repository; `paths` are repository-relative. */
   gitStatus: (root: string) => invoke<GitStatus>("git_status", { root }),
   gitStage: (root: string, paths: string[]) => invoke<void>("git_stage", { root, paths }),

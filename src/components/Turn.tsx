@@ -72,8 +72,9 @@ interface TurnProps {
   permissions?: PermissionRequest[];
   onOpen?: (sessionKey: string) => void;
   onPermission?: (key: string, optionId: string | null) => void;
-  onMerge?: (taskId: string) => void;
+  onMerge?: (taskId: string, files?: string[]) => Promise<unknown> | void;
   onDiscard?: (taskId: string) => void;
+  onOpenTaskDiff?: (hash: string, path: string) => void;
   /** The lead conversation is responding. */
   leadBusy?: boolean;
 }
@@ -104,6 +105,7 @@ export function TurnView(p: TurnProps) {
           onPermission={onPermission ?? (() => {})}
           onMerge={p.onMerge ?? (() => {})}
           onDiscard={p.onDiscard ?? (() => {})}
+          onOpenDiff={p.onOpenTaskDiff}
           leadBusy={!!p.leadBusy}
         />
       )}
