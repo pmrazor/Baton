@@ -30,7 +30,12 @@ function cargoPackages() {
 }
 
 function npmPackages() {
-  const tree = JSON.parse(execFileSync("npm", ["ls", "--omit=dev", "--all", "--json"], { cwd: root, maxBuffer: 64 * 1024 * 1024 }));
+  const tree = JSON.parse(
+    execFileSync("npm", ["ls", "--package-lock-only", "--omit=dev", "--all", "--json"], {
+      cwd: root,
+      maxBuffer: 64 * 1024 * 1024,
+    }),
+  );
   const seen = new Map();
   const walk = (deps) => {
     for (const [name, info] of Object.entries(deps ?? {})) {

@@ -15,7 +15,18 @@ import {
 } from "./types";
 import { HANDOFF_BRIEF_LABEL, handoffMemo, isLimitError } from "./handoff";
 import Sidebar from "./components/Sidebar";
-import ChatView, { TitleBar, type Tab } from "./components/ChatView";
+import { TeamsContext } from "./components/taskLabels";
+import ChatView, { TitleBar, type ChatViewProps, type Tab } from "./components/ChatView";
+import ProLayout from "./components/ProLayout";
+import {
+  CHAT_PANEL_WIDTH,
+  SUB_SIDEBAR_WIDTH,
+  clampChatPanelWidth,
+  clampSubSidebarWidth,
+  normalizeTabForMode,
+  parseUiMode,
+  type UiMode,
+} from "./components/proLayoutState";
 import SettingsModal, { type SettingsTab } from "./components/SettingsModal";
 import ImportModal, { type Imported } from "./components/ImportModal";
 import UpdateBanner from "./components/UpdateBanner";
@@ -23,6 +34,8 @@ import WindowControls from "./components/WindowControls";
 import { findUpdate } from "./update";
 import type { Update } from "@tauri-apps/plugin-updater";
 import { quotasFromUsageReport } from "./usage";
+import FileTree from "./components/code/FileTree";
+import CodeEditor from "./components/code/CodeEditor";
 
 // Per-user conveniences only; losing them just resets the sidebar.
 const STORE = {
@@ -34,6 +47,9 @@ const STORE = {
   launch: "baton.launch",
   agentMode: "baton.agentMode",
   team: "baton.team",
+  uiMode: "baton.uiMode",
+  proSubWidth: "baton.proSubWidth",
+  proChatWidth: "baton.proChatWidth",
 };
 
 /** What goes to disk: everything except live-process state. */
@@ -63,14 +79,15 @@ function fromSaved(v: any): Session | null {
     ...v,
     // Tasks can't outlive the app: anything unfinished was interrupted.
     tasks: Array.isArray(v.tasks)
-      ? v.tasks.map((t: any) =>
-          isTaskActive(t.status)
-            ? { ...t, status: "cancelled" }
-            : t.mergeState === "pending"
+      ? v.tasks.map((t: any) => {
+          const base = { reassigned: [], limitHit: false, ...t };
+          return isTaskActive(base.status)
+            ? { ...base, status: "cancelled" }
+            : base.mergeState === "pending"
               ? // The worktree outlives the app but the app no longer tracks it.
-                { ...t, status: "failed", mergeState: null, error: "앱을 다시 시작해서 이 작업은 병합할 수 없어요" }
-              : t,
-        )
+                { ...base, status: "failed", mergeState: null, limitHit: false, error: "앱을 다시 시작해서 이 작업은 병합할 수 없어요" }
+              : base;
+        })
       : v.tasks,
     updatedAt: v.updatedAt ?? v.createdAt ?? Date.now(),
     busy: false,
@@ -120,6 +137,13 @@ export default function App() {
   const [state, dispatch] = useReducer(reducer, undefined, init);
   const [connecting, setConnecting] = useState<string | null>(null);
   const [rail, setRail] = useState(() => read<boolean>(STORE.rail, false));
+  const [uiMode, setUiMode] = useState<UiMode>(() => parseUiMode(read<string>(STORE.uiMode, "simple")));
+  const [proSubWidth, setProSubWidth] = useState(() =>
+    clampSubSidebarWidth(read<number>(STORE.proSubWidth, SUB_SIDEBAR_WIDTH.default)),
+  );
+  const [proChatWidth, setProChatWidth] = useState(() =>
+    clampChatPanelWidth(read<number>(STORE.proChatWidth, CHAT_PANEL_WIDTH.default)),
+  );
   const [settingsTab, setSettingsTab] = useState<SettingsTab | null>(null);
   const [importCwd, setImportCwd] = useState<string | null>(null);
   const [update, setUpdate] = useState<Update | null>(null);
@@ -185,6 +209,9 @@ export default function App() {
   useEffect(() => write(STORE.workspaces, state.workspaces), [state.workspaces]);
   useEffect(() => write(STORE.workspace, state.workspace), [state.workspace]);
   useEffect(() => write(STORE.rail, rail), [rail]);
+  useEffect(() => write(STORE.uiMode, uiMode), [uiMode]);
+  useEffect(() => write(STORE.proSubWidth, proSubWidth), [proSubWidth]);
+  useEffect(() => write(STORE.proChatWidth, proChatWidth), [proChatWidth]);
   useEffect(() => write(STORE.agentMode, agentMode), [agentMode]);
   useEffect(() => write(STORE.team, teamId), [teamId]);
   useEffect(() => {
@@ -598,91 +625,136 @@ export default function App() {
     }
   }, []);
 
+  const changeUiMode = useCallback((mode: UiMode) => {
+    setUiMode(mode);
+    setTab((t) => normalizeTabForMode(t, mode));
+  }, []);
+
+  /** Switch to Pro mode and focus the 코드 tab when a file is opened. */
+  const openCode = useCallback(() => {
+    setUiMode("pro");
+    setTab("code");
+  }, []);
+
+  const chatProps: ChatViewProps = {
+    state,
+    session: active,
+    connecting:
+      connecting ?? (active && !active.attached && !active.attachError && !active.archived ? active.agentId : null),
+    onRetryAttach: (key) => {
+      // Re-check the folder first: it may have been restored.
+      const cwd = state.sessions.find((s) => s.key === key)?.cwd;
+      api.missingPaths(cwd ? [cwd] : []).then((gone) => {
+        dispatch({ type: "missing", paths: [...state.missing.filter((m) => m !== cwd), ...gone] });
+        dispatch({ type: "attachRetry", key });
+      });
+    },
+    tab,
+    showTitle: !rail,
+    onTab: setTab,
+    onAddWorkspace: addWorkspace,
+    onNewChat: newChat,
+    onSend: sendPrompt,
+    onCancel: cancel,
+    onPermission: answerPermission,
+    onSetConfig: setConfig,
+    onSetMode: setMode,
+    onDismissAuth: () => dispatch({ type: "authPrompt", prompt: null }),
+    onOpenAgents: () => setSettingsTab("agents"),
+    agentMode,
+    teamId,
+    onChangeMode: changeMode,
+    onOpenSession: openSession,
+    onHandoff: handoffLead,
+    onDismissLimit: (key) => dispatch({ type: "dismissLimited", key }),
+    banner: update && <UpdateBanner update={update} onDismiss={() => setUpdate(null)} />,
+    onMergeTask: (session, taskId) =>
+      api
+        .mergeTask(taskId)
+        .then((r) =>
+          dispatch({
+            type: "notice",
+            key: session.key,
+            tone: r.conflicts.length ? "error" : "info",
+            text: r.conflicts.length
+              ? `병합했지만 충돌이 있어요: ${r.conflicts.join(", ")}`
+              : `${r.merged_files.length}개 파일을 워크스페이스에 병합했어요`,
+          }),
+        )
+        .catch((e) => dispatch({ type: "notice", key: session.key, text: toHubError(e).message, tone: "error" })),
+    onDiscardTask: (session, taskId) =>
+      api
+        .discardTask(taskId)
+        .catch((e) => dispatch({ type: "notice", key: session.key, text: toHubError(e).message, tone: "error" })),
+  };
+
+  // The chat's own folder: a task's chat shows its worktree, like the terminal does.
+  const codeRoot = active?.cwd ?? state.workspace;
+  const fileTree = codeRoot ? <FileTree key={codeRoot} root={codeRoot} onOpen={openCode} /> : null;
+  const editor = codeRoot ? <CodeEditor key={codeRoot} root={codeRoot} /> : null;
+
   return (
-    <div className={`app ${rail ? "rail-mode" : ""}`}>
-      {rail && (
-        <TitleBar
-          className="full"
-          state={state}
-          session={active}
-          onOpenSession={openSession}
+    <TeamsContext.Provider value={state.teams}>
+      {uiMode === "pro" ? (
+        <ProLayout
+          rail={{
+            workspaces: state.workspaces,
+            workspace: state.workspace,
+            sessions: state.sessions,
+            teams: state.teams,
+            activeKey: state.activeKey,
+            permissions: state.permissions,
+            missing: state.missing,
+            onNewChat: (ws) => newChat(ws),
+            onAddWorkspace: addWorkspace,
+            onSelectWorkspace: (path) => dispatch({ type: "workspaceSelect", path }),
+            onActivate: (key) => dispatch({ type: "activate", key }),
+            onOpenSettings: () => setSettingsTab("accounts"),
+          }}
+          chat={{ ...chatProps, showTitle: false }}
+          fileTree={fileTree}
+          editor={editor}
+          subWidth={proSubWidth}
+          onSubWidthChange={setProSubWidth}
+          chatWidth={proChatWidth}
+          onChatWidthChange={setProChatWidth}
+          onSwitchSimple={() => changeUiMode("simple")}
         />
+      ) : (
+        <div className={`app ${rail ? "rail-mode" : ""}`}>
+          {rail && (
+            <TitleBar
+              className="full"
+              state={state}
+              session={active}
+              onOpenSession={openSession}
+            />
+          )}
+          <Sidebar
+            agents={state.agents}
+            workspaces={state.workspaces}
+            workspace={state.workspace}
+            sessions={state.sessions}
+            teams={state.teams}
+            activeKey={state.activeKey}
+            permissions={state.permissions}
+            onNewChat={(ws) => newChat(ws)}
+            onAddWorkspace={addWorkspace}
+            onSelectWorkspace={(path) => dispatch({ type: "workspaceSelect", path })}
+            onRemoveWorkspace={(path) => dispatch({ type: "workspaceRemove", path })}
+            onImport={setImportCwd}
+            missing={state.missing}
+            onActivate={(key) => dispatch({ type: "activate", key })}
+            onCloseSession={deleteSession}
+            rail={rail}
+            onToggleRail={() => setRail((r) => !r)}
+            onOpenSettings={() => setSettingsTab("accounts")}
+            uiMode={uiMode}
+            onUiMode={changeUiMode}
+          />
+          <ChatView {...chatProps} />
+        </div>
       )}
-      <Sidebar
-        agents={state.agents}
-        workspaces={state.workspaces}
-        workspace={state.workspace}
-        sessions={state.sessions}
-        activeKey={state.activeKey}
-        permissions={state.permissions}
-        onNewChat={(ws) => newChat(ws)}
-        onAddWorkspace={addWorkspace}
-        onSelectWorkspace={(path) => dispatch({ type: "workspaceSelect", path })}
-        onRemoveWorkspace={(path) => dispatch({ type: "workspaceRemove", path })}
-        onImport={setImportCwd}
-        missing={state.missing}
-        onActivate={(key) => dispatch({ type: "activate", key })}
-        onCloseSession={deleteSession}
-        rail={rail}
-        onToggleRail={() => setRail((r) => !r)}
-        onOpenSettings={() => setSettingsTab("accounts")}
-      />
-      <ChatView
-        state={state}
-        session={active}
-        connecting={
-          connecting ?? (active && !active.attached && !active.attachError && !active.archived ? active.agentId : null)
-        }
-        onRetryAttach={(key) => {
-          // Re-check the folder first: it may have been restored.
-          const cwd = state.sessions.find((s) => s.key === key)?.cwd;
-          api
-            .missingPaths(cwd ? [cwd] : [])
-            .then((gone) => {
-              dispatch({ type: "missing", paths: [...state.missing.filter((m) => m !== cwd), ...gone] });
-              dispatch({ type: "attachRetry", key });
-            });
-        }}
-        tab={tab}
-        showTitle={!rail}
-        onTab={setTab}
-        onAddWorkspace={addWorkspace}
-        onNewChat={newChat}
-        onSend={sendPrompt}
-        onCancel={cancel}
-        onPermission={answerPermission}
-        onSetConfig={setConfig}
-        onSetMode={setMode}
-        onDismissAuth={() => dispatch({ type: "authPrompt", prompt: null })}
-        onOpenAgents={() => setSettingsTab("agents")}
-        agentMode={agentMode}
-        teamId={teamId}
-        onChangeMode={changeMode}
-        onOpenSession={openSession}
-        onHandoff={handoffLead}
-        onDismissLimit={(key) => dispatch({ type: "dismissLimited", key })}
-        banner={update && <UpdateBanner update={update} onDismiss={() => setUpdate(null)} />}
-        onMergeTask={(session, taskId) =>
-          api
-            .mergeTask(taskId)
-            .then((r) =>
-              dispatch({
-                type: "notice",
-                key: session.key,
-                tone: r.conflicts.length ? "error" : "info",
-                text: r.conflicts.length
-                  ? `병합했지만 충돌이 있어요: ${r.conflicts.join(", ")}`
-                  : `${r.merged_files.length}개 파일을 워크스페이스에 병합했어요`,
-              }),
-            )
-            .catch((e) => dispatch({ type: "notice", key: session.key, text: toHubError(e).message, tone: "error" }))
-        }
-        onDiscardTask={(session, taskId) =>
-          api
-            .discardTask(taskId)
-            .catch((e) => dispatch({ type: "notice", key: session.key, text: toHubError(e).message, tone: "error" }))
-        }
-      />
       {isWindows && <WindowControls />}
       {importCwd && (
         <ImportModal
@@ -703,6 +775,6 @@ export default function App() {
           onClose={() => setSettingsTab(null)}
         />
       )}
-    </div>
+    </TeamsContext.Provider>
   );
 }

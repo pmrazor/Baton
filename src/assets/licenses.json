@@ -18,10 +18,192 @@
  ],
  "packages": [
   {
+   "name": "@codemirror/autocomplete",
+   "version": "6.20.4",
+   "license": "MIT",
+   "url": "https://code.haverbeke.berlin/codemirror/autocomplete",
+   "source": "npm"
+  },
+  {
+   "name": "@codemirror/commands",
+   "version": "6.11.1",
+   "license": "MIT",
+   "url": "https://code.haverbeke.berlin/codemirror/commands",
+   "source": "npm"
+  },
+  {
+   "name": "@codemirror/lang-css",
+   "version": "6.3.1",
+   "license": "MIT",
+   "url": "https://github.com/codemirror/lang-css",
+   "source": "npm"
+  },
+  {
+   "name": "@codemirror/lang-html",
+   "version": "6.4.12",
+   "license": "MIT",
+   "url": "https://code.haverbeke.berlin/codemirror/lang-html",
+   "source": "npm"
+  },
+  {
+   "name": "@codemirror/lang-javascript",
+   "version": "6.2.5",
+   "license": "MIT",
+   "url": "https://github.com/codemirror/lang-javascript",
+   "source": "npm"
+  },
+  {
+   "name": "@codemirror/lang-json",
+   "version": "6.0.2",
+   "license": "MIT",
+   "url": "https://github.com/codemirror/lang-json",
+   "source": "npm"
+  },
+  {
+   "name": "@codemirror/lang-markdown",
+   "version": "6.5.2",
+   "license": "MIT",
+   "url": "https://code.haverbeke.berlin/codemirror/lang-markdown",
+   "source": "npm"
+  },
+  {
+   "name": "@codemirror/lang-python",
+   "version": "6.2.1",
+   "license": "MIT",
+   "url": "https://github.com/codemirror/lang-python",
+   "source": "npm"
+  },
+  {
+   "name": "@codemirror/lang-rust",
+   "version": "6.0.2",
+   "license": "MIT",
+   "url": "https://github.com/codemirror/lang-rust",
+   "source": "npm"
+  },
+  {
+   "name": "@codemirror/lang-yaml",
+   "version": "6.1.3",
+   "license": "MIT",
+   "url": "https://github.com/codemirror/lang-yaml",
+   "source": "npm"
+  },
+  {
+   "name": "@codemirror/language",
+   "version": "6.13.1",
+   "license": "MIT",
+   "url": "https://code.haverbeke.berlin/codemirror/language",
+   "source": "npm"
+  },
+  {
+   "name": "@codemirror/legacy-modes",
+   "version": "6.5.5",
+   "license": "MIT",
+   "url": "https://code.haverbeke.berlin/codemirror/legacy-modes",
+   "source": "npm"
+  },
+  {
+   "name": "@codemirror/search",
+   "version": "6.7.2",
+   "license": "MIT",
+   "url": "https://code.haverbeke.berlin/codemirror/search",
+   "source": "npm"
+  },
+  {
+   "name": "@codemirror/state",
+   "version": "6.7.6",
+   "license": "MIT",
+   "url": "https://code.haverbeke.berlin/codemirror/state",
+   "source": "npm"
+  },
+  {
+   "name": "@codemirror/streamparser",
+   "version": "6.0.0",
+   "license": "MIT",
+   "url": "https://code.haverbeke.berlin/codemirror/streamparser",
+   "source": "npm"
+  },
+  {
+   "name": "@codemirror/view",
+   "version": "6.43.15",
+   "license": "MIT",
+   "url": "https://code.haverbeke.berlin/codemirror/view",
+   "source": "npm"
+  },
+  {
    "name": "@fontsource-variable/jetbrains-mono",
    "version": "5.3.0",
    "license": "OFL-1.1",
    "url": "https://github.com/fontsource/font-files",
+   "source": "npm"
+  },
+  {
+   "name": "@lezer/common",
+   "version": "1.5.6",
+   "license": "MIT",
+   "url": "https://code.haverbeke.berlin/lezer/common",
+   "source": "npm"
+  },
+  {
+   "name": "@lezer/css",
+   "version": "1.3.9",
+   "license": "MIT",
+   "url": "https://code.haverbeke.berlin/lezer/css",
+   "source": "npm"
+  },
+  {
+   "name": "@lezer/highlight",
+   "version": "1.2.5",
+   "license": "MIT",
+   "url": "https://code.haverbeke.berlin/lezer/highlight",
+   "source": "npm"
+  },
+  {
+   "name": "@lezer/html",
+   "version": "1.3.13",
+   "license": "MIT",
+   "url": "https://github.com/lezer-parser/html",
+   "source": "npm"
+  },
+  {
+   "name": "@lezer/json",
+   "version": "1.0.3",
+   "license": "MIT",
+   "url": "https://github.com/lezer-parser/json",
+   "source": "npm"
+  },
+  {
+   "name": "@lezer/lr",
+   "version": "1.4.12",
+   "license": "MIT",
+   "url": "https://code.haverbeke.berlin/lezer/lr",
+   "source": "npm"
+  },
+  {
+   "name": "@lezer/markdown",
+   "version": "1.8.1",
+   "license": "MIT",
+   "url": "https://code.haverbeke.berlin/lezer/markdown",
+   "source": "npm"
+  },
+  {
+   "name": "@lezer/python",
+   "version": "1.1.19",
+   "license": "MIT",
+   "url": "https://code.haverbeke.berlin/lezer/python",
+   "source": "npm"
+  },
+  {
+   "name": "@lezer/rust",
+   "version": "1.0.3",
+   "license": "MIT",
+   "url": "https://code.haverbeke.berlin/lezer/rust",
+   "source": "npm"
+  },
+  {
+   "name": "@lezer/yaml",
+   "version": "1.0.4",
+   "license": "MIT",
+   "url": "https://github.com/lezer-parser/yaml",
    "source": "npm"
   },
   {
@@ -646,6 +828,13 @@
    "license": "MIT OR Apache-2.0",
    "url": "https://github.com/srijs/rust-crc32fast",
    "source": "cargo"
+  },
+  {
+   "name": "crelt",
+   "version": "1.0.7",
+   "license": "MIT",
+   "url": "https://code.haverbeke.berlin/marijn/crelt",
+   "source": "npm"
   },
   {
    "name": "crossbeam-channel",
@@ -3735,6 +3924,13 @@
    "source": "cargo"
   },
   {
+   "name": "trash",
+   "version": "5.2.5",
+   "license": "MIT",
+   "url": "https://github.com/ArturKovacs/trash",
+   "source": "cargo"
+  },
+  {
    "name": "tray-icon",
    "version": "0.25.1",
    "license": "MIT OR Apache-2.0",
@@ -3851,6 +4047,13 @@
    "version": "2.5.9",
    "license": "MIT OR Apache-2.0",
    "url": "https://github.com/servo/rust-url",
+   "source": "cargo"
+  },
+  {
+   "name": "urlencoding",
+   "version": "2.1.3",
+   "license": "MIT",
+   "url": "https://github.com/kornelski/rust_urlencoding",
    "source": "cargo"
   },
   {
@@ -4100,6 +4303,13 @@
   },
   {
    "name": "windows",
+   "version": "0.56.0",
+   "license": "MIT OR Apache-2.0",
+   "url": "https://github.com/microsoft/windows-rs",
+   "source": "cargo"
+  },
+  {
+   "name": "windows",
    "version": "0.62.2",
    "license": "MIT OR Apache-2.0",
    "url": "https://github.com/microsoft/windows-rs",
@@ -4219,6 +4429,13 @@
   },
   {
    "name": "windows-core",
+   "version": "0.56.0",
+   "license": "MIT OR Apache-2.0",
+   "url": "https://github.com/microsoft/windows-rs",
+   "source": "cargo"
+  },
+  {
+   "name": "windows-core",
    "version": "0.62.2",
    "license": "MIT OR Apache-2.0",
    "url": "https://github.com/microsoft/windows-rs",
@@ -4233,7 +4450,21 @@
   },
   {
    "name": "windows-implement",
+   "version": "0.56.0",
+   "license": "MIT OR Apache-2.0",
+   "url": "https://github.com/microsoft/windows-rs",
+   "source": "cargo"
+  },
+  {
+   "name": "windows-implement",
    "version": "0.60.2",
+   "license": "MIT OR Apache-2.0",
+   "url": "https://github.com/microsoft/windows-rs",
+   "source": "cargo"
+  },
+  {
+   "name": "windows-interface",
+   "version": "0.56.0",
    "license": "MIT OR Apache-2.0",
    "url": "https://github.com/microsoft/windows-rs",
    "source": "cargo"
@@ -4262,6 +4493,13 @@
   {
    "name": "windows-registry",
    "version": "0.6.1",
+   "license": "MIT OR Apache-2.0",
+   "url": "https://github.com/microsoft/windows-rs",
+   "source": "cargo"
+  },
+  {
+   "name": "windows-result",
+   "version": "0.1.2",
    "license": "MIT OR Apache-2.0",
    "url": "https://github.com/microsoft/windows-rs",
    "source": "cargo"

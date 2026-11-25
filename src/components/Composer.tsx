@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import AttachmentView from "./AttachmentView";
 import { api, toHubError } from "../api";
+import { onAttach } from "../composerBus";
 import {
   attachmentOf,
   DEFAULT_PROFILE,
@@ -150,6 +151,8 @@ export default function Composer(p: Props) {
       off.then((unlisten) => unlisten());
     };
   }, []);
+
+  useEffect(() => onAttach(addPaths), []);
 
   const pickFiles = async () => {
     const picked = await openDialog({ multiple: true, directory: false, title: "첨부할 파일" });

@@ -287,6 +287,10 @@ export interface TaskInfo {
   changes: string[];
   mergeState: "none" | "pending" | "merged" | "conflict" | "discarded" | null;
   conflicts: string[];
+  /** Member switches after a limit error, e.g. "a → b (usage limit)". */
+  reassigned: string[];
+  /** True when the task ended or was moved because of a usage limit. */
+  limitHit: boolean;
   /** The lead's user message (turn) this task was created in. */
   turnId?: string;
 }

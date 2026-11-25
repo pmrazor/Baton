@@ -1,6 +1,7 @@
 pub mod acp;
 pub mod agents;
 mod attachments;
+mod files;
 mod history;
 mod hub;
 mod legacy;
@@ -521,6 +522,15 @@ pub fn run() {
             terminal::terminal_resize,
             terminal::terminal_close,
             terminal::terminal_list,
+            files::fs_list,
+            files::fs_read,
+            files::fs_write,
+            files::fs_stat,
+            files::fs_create_file,
+            files::fs_create_dir,
+            files::fs_rename,
+            files::fs_copy,
+            files::fs_trash,
         ])
         .build(tauri::generate_context!())
         .expect("error while running Baton")

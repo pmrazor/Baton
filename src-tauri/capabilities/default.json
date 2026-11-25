@@ -9,6 +9,7 @@
     "core:default",
     "dialog:allow-open",
     "opener:allow-open-url",
+    "opener:allow-reveal-item-in-dir",
     "core:window:allow-start-dragging",
     "dialog:allow-ask",
     "updater:default",

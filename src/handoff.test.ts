@@ -45,6 +45,8 @@ const makeTask = (id: string, patch: Partial<TaskInfo> = {}): TaskInfo => ({
   changes: ["M src/auth.ts"],
   mergeState: "pending",
   conflicts: [],
+  reassigned: [],
+  limitHit: false,
   ...patch,
 });
 

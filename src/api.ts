@@ -40,6 +40,39 @@ export interface NewSessionResult {
   modes?: SessionModes | null;
 }
 
+export interface FsEntry {
+  name: string;
+  path: string;
+  dir: boolean;
+}
+
+export interface FileContent {
+  text: string;
+  mtime: number;
+}
+
+export type FsErrorKind =
+  | "invalid_path"
+  | "not_found"
+  | "already_exists"
+  | "too_large"
+  | "binary"
+  | "conflict"
+  | "io";
+
+export interface FsError {
+  kind: FsErrorKind;
+  message: string;
+}
+
+export function toFsError(e: unknown): FsError {
+  if (e && typeof e === "object" && "kind" in e && "message" in e) {
+    const err = e as { kind: unknown; message: unknown };
+    return { kind: String(err.kind) as FsErrorKind, message: String(err.message) };
+  }
+  return { kind: "io", message: String(e) };
+}
+
 export const api = {
   listAgents: () => invoke<AgentInfo[]>("list_agents"),
   agentsConfigPath: () => invoke<string>("agents_config_path"),
@@ -118,6 +151,16 @@ export const api = {
   terminalClose: (id: string) => invoke<void>("terminal_close", { id }),
   /** The running shells, to find them again after a webview reload. */
   terminalList: () => invoke<{ id: string; cwd: string }[]>("terminal_list"),
+  fsList: (root: string, dir: string) => invoke<FsEntry[]>("fs_list", { root, dir }),
+  fsRead: (root: string, path: string) => invoke<FileContent>("fs_read", { root, path }),
+  fsWrite: (root: string, path: string, text: string, expectedMtime: number | null) =>
+    invoke<number>("fs_write", { root, path, text, expectedMtime }),
+  fsStat: (root: string, paths: string[]) => invoke<(number | null)[]>("fs_stat", { root, paths }),
+  fsCreateFile: (root: string, path: string) => invoke<void>("fs_create_file", { root, path }),
+  fsCreateDir: (root: string, path: string) => invoke<void>("fs_create_dir", { root, path }),
+  fsRename: (root: string, from: string, to: string) => invoke<void>("fs_rename", { root, from, to }),
+  fsCopy: (root: string, from: string, toDir: string) => invoke<string>("fs_copy", { root, from, toDir }),
+  fsTrash: (root: string, path: string) => invoke<void>("fs_trash", { root, path }),
 };
 
 /** Terminal output (UTF-8 text) and shell exits, for every terminal. `gone`:

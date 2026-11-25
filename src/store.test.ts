@@ -50,6 +50,8 @@ const task = (id: string, patch: Partial<TaskInfo> = {}): TaskInfo => ({
   changes: [],
   mergeState: null,
   conflicts: [],
+  reassigned: [],
+  limitHit: false,
   ...patch,
 });
 

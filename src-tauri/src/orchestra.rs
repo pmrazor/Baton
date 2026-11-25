@@ -133,6 +133,10 @@ pub struct TaskInfo {
     /// none | pending | merged | conflict | discarded; isolated tasks only.
     pub merge_state: Option<String>,
     pub conflicts: Vec<String>,
+    /// Member switches after a limit error, e.g. "a → b (usage limit)".
+    pub reassigned: Vec<String>,
+    /// True when the task ended or was moved because of a usage limit.
+    pub limit_hit: bool,
 }
 
 struct Task {
@@ -149,8 +153,6 @@ struct Task {
     sandbox: Option<Sandbox>,
     /// Files sent with the next turn: the brief's, then each follow-up's own.
     attachments: Vec<String>,
-    /// Member switches after a limit error, e.g. "a → b (usage limit)".
-    reassigned: Vec<String>,
 }
 
 pub struct Orchestra {
@@ -551,6 +553,8 @@ impl Orchestra {
             changes: Vec::new(),
             merge_state: None,
             conflicts: Vec::new(),
+            reassigned: Vec::new(),
+            limit_hit: false,
         };
         self.tasks.lock().unwrap().insert(
             id.clone(),
@@ -565,7 +569,6 @@ impl Orchestra {
                 cancel_requested: false,
                 sandbox: None,
                 attachments,
-                reassigned: Vec::new(),
             },
         );
         self.emit_task(&id);
@@ -639,8 +642,8 @@ impl Orchestra {
             "merge_state": task.info.merge_state,
             "conflicts": task.info.conflicts,
         });
-        if !task.reassigned.is_empty() {
-            out["reassigned"] = json!(task.reassigned.join("; "));
+        if !task.info.reassigned.is_empty() {
+            out["reassigned"] = json!(task.info.reassigned.join("; "));
         }
         out
     }
@@ -847,7 +850,14 @@ async fn run_turn(app: AppHandle, token: String, task_id: String, message: Strin
         orch.set_status(&task_id, "running");
 
         // Absolute paths, so they still resolve from a worktree task's copy of the workspace.
-        let outcome = hub.prompt(&member.agent_id, &session_id, &prompt, &attachments).await.map_err(|e| e.message);
+        let mut outcome = hub.prompt(&member.agent_id, &session_id, &prompt, &attachments).await.map_err(|e| e.message);
+        // Some agents (Antigravity) report a used-up quota as an ordinary reply.
+        if outcome.is_ok() {
+            let answer = orch.tasks.lock().unwrap().get(&task_id).map(|t| t.answer.clone()).unwrap_or_default();
+            if is_limit_notice(&answer) {
+                outcome = Err(answer.trim().to_string());
+            }
+        }
         let error = match &outcome {
             Err(e) if is_limit_error(e) && !cancelled(&orch) => e.clone(),
             _ => break outcome,
@@ -881,7 +891,8 @@ async fn run_turn(app: AppHandle, token: String, task_id: String, message: Strin
             t.info.member_name = next.name.clone();
             t.info.agent_id = next.agent_id.clone();
             t.info.session_id = None;
-            t.reassigned.push(note.clone());
+            t.info.reassigned.push(note.clone());
+            t.info.limit_hit = true;
         }
         // The old session's late updates must not end up in the new answer.
         orch.by_session.lock().unwrap().remove(&(member.agent_id.clone(), session_id));
@@ -904,7 +915,7 @@ async fn run_turn(app: AppHandle, token: String, task_id: String, message: Strin
         if switches > 0 {
             t.result = format!(
                 "[Baton] Reassigned {} after usage limits; the report below is from '{}'.\n\n{}",
-                t.reassigned.join(", then "),
+                t.info.reassigned.join(", then "),
                 t.info.member_id,
                 t.result
             );
@@ -920,6 +931,9 @@ async fn run_turn(app: AppHandle, token: String, task_id: String, message: Strin
             },
             Err(e) => {
                 t.info.error = Some(e.clone());
+                if is_limit_error(e) {
+                    t.info.limit_hit = true;
+                }
                 "failed"
             }
         };
@@ -1054,6 +1068,9 @@ fn installed(hub: &Hub, agent_id: &str) -> bool {
 fn fail(orch: &Orchestra, task_id: &str, message: &str) {
     if let Some(t) = orch.tasks.lock().unwrap().get_mut(task_id) {
         t.info.error = Some(message.into());
+        if is_limit_error(message) {
+            t.info.limit_hit = true;
+        }
     }
     orch.set_status(task_id, "failed");
 }
@@ -1062,9 +1079,17 @@ fn fail(orch: &Orchestra, task_id: &str, message: &str) {
 fn is_limit_error(msg: &str) -> bool {
     let m = msg.to_lowercase();
     (m.contains("hit your") && m.contains("limit"))
-        || ["usage limit", "rate limit", "usagelimitexceeded", "ratelimitexceeded", "resource_exhausted", "quota exceeded", "429"]
+        || ["usage limit", "rate limit", "usagelimitexceeded", "ratelimitexceeded", "resource_exhausted", "quota exceeded", "quota reached", "429"]
             .iter()
             .any(|k| m.contains(k))
+}
+
+/// Whether a whole reply is just the agent saying its quota ran out, e.g.
+/// Antigravity's "⚠ Individual quota reached. … Resets in 2h50m59s." Only
+/// short replies count, so a member writing *about* rate limits isn't mistaken.
+fn is_limit_notice(answer: &str) -> bool {
+    let a = answer.trim();
+    !a.is_empty() && a.chars().count() <= 300 && is_limit_error(a)
 }
 
 /// The model setting a member's limits are tracked under.
@@ -1572,9 +1597,14 @@ mod tests {
             "RESOURCE_EXHAUSTED: quota for gemini-3-pro",
             "Quota exceeded for this project",
             "HTTP 429 Too Many Requests",
+            "⚠ Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 2h50m59s.",
         ] {
             assert!(is_limit_error(yes), "{yes}");
         }
+        assert!(is_limit_notice("\n⚠ Individual quota reached. Please upgrade your subscription. Resets in 2h50m59s.\n"));
+        let essay = format!("I added retry logic for the rate limit (HTTP 429) path. {}", "Details follow. ".repeat(30));
+        assert!(!is_limit_notice(&essay), "a long report that mentions limits is a real answer");
+        assert!(!is_limit_notice(""));
         for no in ["Internal error", "the agent refused the task", "You've hit your head", "connection reset", "lead session is gone"] {
             assert!(!is_limit_error(no), "{no}");
         }
@@ -1694,6 +1724,8 @@ mod tests {
                     changes: Vec::new(),
                     merge_state: None,
                     conflicts: Vec::new(),
+                    reassigned: Vec::new(),
+                    limit_hit: false,
                 },
                 member,
                 cwd: "/work".into(),
@@ -1704,7 +1736,6 @@ mod tests {
                 cancel_requested: false,
                 sandbox: None,
                 attachments: Vec::new(),
-                reassigned: Vec::new(),
             }
         };
 
@@ -1727,5 +1758,36 @@ mod tests {
         assert_eq!((tasks["t2"].info.lead_agent_id.as_str(), tasks["t2"].info.lead_session_id.as_str()), ("codex", "new"));
         assert_eq!((tasks["t3"].info.lead_agent_id.as_str(), tasks["t3"].info.lead_session_id.as_str()), ("claude", "other"));
         assert_eq!((tasks["t4"].info.lead_agent_id.as_str(), tasks["t4"].info.lead_session_id.as_str()), ("codex", "old"));
+    }
+
+    #[test]
+    fn task_info_serializes_reassigned_and_limit_hit() {
+        let info = TaskInfo {
+            id: "r1-1".into(),
+            lead_agent_id: "claude".into(),
+            lead_session_id: "lead".into(),
+            title: "Fix bug".into(),
+            member_id: "antigravity-claude-opus-5-5".into(),
+            member_name: "Antigravity · Opus".into(),
+            agent_id: "antigravity".into(),
+            session_id: Some("sub-1".into()),
+            status: "done".into(),
+            writes: true,
+            started_at: Some(100),
+            ended_at: Some(200),
+            error: None,
+            isolated: true,
+            changes: Vec::new(),
+            merge_state: Some("none".into()),
+            conflicts: Vec::new(),
+            reassigned: vec!["claude-opus-5-5 → antigravity-claude-opus-5-5 (usage limit)".into()],
+            limit_hit: true,
+        };
+        let serialized = serde_json::to_value(&info).unwrap();
+        assert_eq!(
+            serialized["reassigned"],
+            json!(["claude-opus-5-5 → antigravity-claude-opus-5-5 (usage limit)"])
+        );
+        assert_eq!(serialized["limitHit"], json!(true));
     }
 }

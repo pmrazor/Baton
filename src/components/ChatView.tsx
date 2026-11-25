@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useRef, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, useLayoutEffect, useRef, type ReactNode } from "react";
 import { Download, FolderPlus } from "lucide-react";
 import { api } from "../api";
 import { accountLimit, leadLimit } from "../handoff";
@@ -25,7 +25,7 @@ import { fmtReset } from "./UsagePanel";
 // xterm is loaded only once a terminal is opened.
 const TerminalView = lazy(() => import("./TerminalView"));
 
-interface Props {
+export interface ChatViewProps {
   state: State;
   session: Session | null;
   connecting: string | null;
@@ -56,14 +56,24 @@ interface Props {
   onDismissLimit: (key: string) => void;
 }
 
-export type Tab = "chat" | "terminal" | "activity" | "logs";
+export type Tab = "chat" | "code" | "terminal" | "activity" | "logs";
 
-const TABS = [
+export type TabEntry = readonly [Tab, string];
+
+const TABS: readonly TabEntry[] = [
   ["chat", "대화"],
   ["terminal", "터미널"],
   ["activity", "활동"],
   ["logs", "로그"],
-] as const;
+];
+
+export const PRO_TABS: readonly TabEntry[] = [
+  ["chat", "대화"],
+  ["code", "코드"],
+  ["terminal", "터미널"],
+  ["activity", "활동"],
+  ["logs", "로그"],
+];
 
 interface BarProps {
   state: State;
@@ -102,15 +112,22 @@ export function TitleBar({ state, session, className = "", onOpenSession }: BarP
   );
 }
 
-function TabBar(p: { session: Session | null; cwd: string | null; tab: Tab; onTab: (tab: Tab) => void }) {
-  const { session, cwd, tab, onTab } = p;
+export function TabBar(p: {
+  session: Session | null;
+  cwd: string | null;
+  tab: Tab;
+  onTab: (tab: Tab) => void;
+  tabs?: readonly TabEntry[];
+  right?: ReactNode;
+}) {
+  const { session, cwd, tab, onTab, tabs = TABS, right } = p;
   const started = !!session && !session.draft;
-  // The terminal only needs a folder, so it works for a draft too (and then
+  // Code and terminal only need a folder, so they work for a draft too (and then
   // 대화 must stay clickable to get back).
-  const enabled = (id: Tab) => (id === "terminal" || id === "chat" ? started || !!cwd : started);
+  const enabled = (id: Tab) => (id === "code" || id === "terminal" || id === "chat" ? started || !!cwd : started);
   return (
     <nav className="tab-bar">
-      {TABS.map(([id, label]) => (
+      {tabs.map(([id, label]) => (
         <button
           key={id}
           className={tab === id ? "active" : ""}
@@ -120,21 +137,26 @@ function TabBar(p: { session: Session | null; cwd: string | null; tab: Tab; onTa
           {label}
         </button>
       ))}
+      {right && <div className="tab-bar-right">{right}</div>}
     </nav>
   );
 }
 
-export default function ChatView(p: Props) {
-  const { state, session, tab } = p;
+export function TerminalPane({ cwd }: { cwd: string }) {
+  return (
+    <Suspense fallback={<div className="terminal-view" />}>
+      <TerminalView cwd={cwd} />
+    </Suspense>
+  );
+}
+
+export function ChatBanners(p: ChatViewProps) {
+  const { state, session } = p;
   const agentName = (id: string) => state.agents.find((a) => a.id === id)?.name ?? id;
-  const cwd = session?.cwd ?? state.workspace;
   const limit = leadLimit(session, state.accountUsage);
 
   return (
-    <main className="main">
-      {p.showTitle && <TitleBar state={state} session={session} onOpenSession={p.onOpenSession} />}
-      <TabBar session={session} cwd={cwd} tab={tab} onTab={p.onTab} />
-
+    <>
       {p.banner}
       {state.workspace && <UnmergedBanner workspace={state.workspace} />}
       {session?.archived && (
@@ -172,12 +194,25 @@ export default function ChatView(p: Props) {
           onDismiss={p.onDismissLimit}
         />
       )}
+    </>
+  );
+}
+
+export default function ChatView(p: ChatViewProps) {
+  const { state, session, tab } = p;
+  const agentName = (id: string) => state.agents.find((a) => a.id === id)?.name ?? id;
+  const cwd = session?.cwd ?? state.workspace;
+
+  return (
+    <main className="main">
+      {p.showTitle && <TitleBar state={state} session={session} onOpenSession={p.onOpenSession} />}
+      <TabBar session={session} cwd={cwd} tab={tab} onTab={p.onTab} />
+
+      <ChatBanners {...p} />
 
       {tab === "terminal" && cwd ? (
         // Without the composer, so keys go to the shell.
-        <Suspense fallback={<div className="terminal-view" />}>
-          <TerminalView cwd={cwd} />
-        </Suspense>
+        <TerminalPane cwd={cwd} />
       ) : state.agents.length > 0 && installedAgents(state.agents).length === 0 ? (
         <div className="welcome">
           <h1>에이전트를 하나 설치해 주세요</h1>
@@ -205,7 +240,12 @@ export default function ChatView(p: Props) {
   );
 }
 
-function ConversationView(p: Props & { agentName: (id: string) => string }) {
+/** Within `threshold` px of the end: new content should keep it scrolled down. */
+export function isNearBottom(scrollTop: number, scrollHeight: number, clientHeight: number, threshold = 80) {
+  return scrollHeight - scrollTop - clientHeight < threshold;
+}
+
+export function ConversationView(p: ChatViewProps & { agentName: (id: string) => string }) {
   const { session, state } = p;
   const listRef = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
@@ -221,10 +261,29 @@ function ConversationView(p: Props & { agentName: (id: string) => string }) {
   const profileId = profileOf(session?.launch);
   const account = agentId ? accountKey(agentId, profileId) : null;
 
-  useEffect(() => {
+  const threadRef = useRef<HTMLDivElement>(null);
+  const pinToBottom = () => {
     const el = listRef.current;
     if (el && stickToBottom.current) el.scrollTop = el.scrollHeight;
-  }, [items, permissions.length]);
+  };
+
+  // Opening a chat (or coming back from another tab) shows its end.
+  useLayoutEffect(() => {
+    stickToBottom.current = true;
+    pinToBottom();
+  }, [session?.key]);
+
+  useEffect(pinToBottom, [items, permissions.length]);
+
+  // Markdown, code blocks and thumbnails grow after the first paint: keep
+  // following them while the user hasn't scrolled up.
+  useEffect(() => {
+    const thread = threadRef.current;
+    if (!thread || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(pinToBottom);
+    observer.observe(thread);
+    return () => observer.disconnect();
+  }, []);
 
   return (
     <>
@@ -233,10 +292,10 @@ function ConversationView(p: Props & { agentName: (id: string) => string }) {
         ref={listRef}
         onScroll={(e) => {
           const el = e.currentTarget;
-          stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+          stickToBottom.current = isNearBottom(el.scrollTop, el.scrollHeight, el.clientHeight);
         }}
       >
-        <div className="thread">
+        <div className="thread" ref={threadRef}>
           {items.length === 0 ? (
             <div className="welcome inline">
               <h1>무엇을 도와드릴까요?</h1>
@@ -302,7 +361,7 @@ function ConversationView(p: Props & { agentName: (id: string) => string }) {
   );
 }
 
-function ActivityView({ session }: { session: Session }) {
+export function ActivityView({ session }: { session: Session }) {
   const tools = session.items.filter((i): i is Extract<ChatItem, { kind: "tool" }> => i.kind === "tool");
   return (
     <div className="scroll">
@@ -317,7 +376,7 @@ function ActivityView({ session }: { session: Session }) {
   );
 }
 
-function LogsView({ lines }: { lines: string[] }) {
+export function LogsView({ lines }: { lines: string[] }) {
   return (
     <div className="scroll">
       <div className="thread">
@@ -327,7 +386,7 @@ function LogsView({ lines }: { lines: string[] }) {
   );
 }
 
-function AuthBanner(p: Props & { agentName: string }) {
+function AuthBanner(p: ChatViewProps & { agentName: string }) {
   const name = accountLabel(p.state, p.state.authPrompt!.agentId, p.state.authPrompt!.profileId);
   const prompt = p.state.authPrompt!;
   const agent = p.state.agents.find((a) => a.id === prompt.agentId);

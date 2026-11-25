@@ -1,8 +1,9 @@
-import { Fragment, useState, type MouseEvent } from "react";
+import { Fragment, useContext, useState, type ComponentType, type MouseEvent } from "react";
 import {
   ChevronDown,
   ChevronRight,
   ChevronUp,
+  Columns2,
   Folder,
   FolderOpen,
   FolderPlus,
@@ -11,34 +12,58 @@ import {
   MessageSquare,
   PanelLeft,
   PanelLeftOpen,
+  Plus,
   Settings,
   SquarePen,
   Workflow,
   X,
 } from "lucide-react";
-import { isTaskActive, sessionKey, type AgentInfo, type PermissionRequest, type Session } from "../types";
+import { isTaskActive, sessionKey, type AgentInfo, type PermissionRequest, type Session, type Team } from "../types";
+import type { ProViewId, UiMode } from "./proLayoutState";
+import { taskLabel, taskTone, TeamsContext } from "./taskLabels";
 import logo from "../assets/logo.png";
 
-interface Props {
-  agents: AgentInfo[];
+export interface ProRailViewItem {
+  id: ProViewId;
+  label: string;
+  icon: ComponentType<{ size?: number }>;
+}
+
+export interface ProRailConfig {
+  views: readonly ProRailViewItem[];
+  activeView: ProViewId | null;
+  onToggleView: (id: ProViewId) => void;
+  onToggleSubSidebar: () => void;
+  onSwitchSimple: () => void;
+}
+
+export interface RailProps {
   workspaces: string[];
   workspace: string | null;
   sessions: Session[];
+  teams?: Team[];
   activeKey: string | null;
   permissions: PermissionRequest[];
+  missing: string[];
   onNewChat: (workspace?: string) => void;
   onAddWorkspace: () => void;
   onSelectWorkspace: (path: string) => void;
+  onActivate: (key: string) => void;
+  onToggleRail?: () => void;
+  onOpenSettings: () => void;
+  pro?: ProRailConfig;
+}
+
+interface Props extends RailProps {
+  agents: AgentInfo[];
   onRemoveWorkspace: (path: string) => void;
   onImport: (path: string) => void;
-  /** Folders that no longer exist on disk. */
-  missing: string[];
-  onActivate: (key: string) => void;
   onCloseSession: (key: string) => void;
   /** Icon-only rail instead of the full sidebar. */
   rail: boolean;
   onToggleRail: () => void;
-  onOpenSettings: () => void;
+  uiMode: UiMode;
+  onUiMode: (mode: UiMode) => void;
 }
 
 export const baseName = (p: string) => p.split(/[\\/]/).filter(Boolean).at(-1) ?? p;
@@ -52,12 +77,14 @@ function relativeTime(ts: number) {
 }
 
 export default function Sidebar(p: Props) {
+  const contextTeams = useContext(TeamsContext);
+  const teams = p.teams ?? contextTeams;
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   // Leads whose finished tasks are unfolded.
   const [showDone, setShowDone] = useState<Record<string, boolean>>({});
   const waiting = new Set(p.permissions.map((r) => sessionKey(r.agentId, r.sessionId)));
 
-  if (p.rail) return <Rail {...p} waiting={waiting} />;
+  if (p.rail) return <Rail {...p} />;
 
   return (
     <aside className="sidebar">
@@ -71,10 +98,14 @@ export default function Sidebar(p: Props) {
         </button>
       </div>
 
-      <button className="new-chat" onClick={() => p.onNewChat()}>
-        <SquarePen size={16} />
-        새 대화
-      </button>
+      <div className="ui-mode-toggle" role="group" aria-label="화면 모드">
+        <button type="button" aria-pressed={p.uiMode === "simple"} onClick={() => p.onUiMode("simple")}>
+          심플
+        </button>
+        <button type="button" aria-pressed={p.uiMode === "pro"} onClick={() => p.onUiMode("pro")}>
+          프로
+        </button>
+      </div>
 
       <div className="section-head">
         <span>워크스페이스</span>
@@ -117,9 +148,6 @@ export default function Sidebar(p: Props) {
                     (isOpen ? <ChevronDown size={13} className="chev" /> : <ChevronRight size={13} className="chev" />)}
                 </button>
                 <span className="row-actions">
-                  <button className="icon-btn sm" title="이 폴더에서 새 대화" onClick={() => p.onNewChat(ws)}>
-                    <SquarePen size={14} />
-                  </button>
                   <button className="icon-btn sm" title="이전 대화 가져오기" onClick={() => p.onImport(ws)}>
                     <History size={14} />
                   </button>
@@ -131,6 +159,14 @@ export default function Sidebar(p: Props) {
                     <X size={14} />
                   </button>
                 </span>
+                <button
+                  className="icon-btn sm workspace-new-chat"
+                  title="이 폴더에서 새 대화"
+                  aria-label="이 폴더에서 새 대화"
+                  onClick={() => p.onNewChat(ws)}
+                >
+                  <Plus size={14} />
+                </button>
               </div>
 
               {isOpen &&
@@ -161,7 +197,11 @@ export default function Sidebar(p: Props) {
                         key={c.key}
                         className={`session-row child ${done ? "done" : ""} ${c.key === p.activeKey ? "active" : ""}`}
                       >
-                        <button className="session-main" onClick={() => p.onActivate(c.key)}>
+                        <button
+                          className="session-main"
+                          title={taskLabel(s, c, waiting, teams)}
+                          onClick={() => p.onActivate(c.key)}
+                        >
                           <span className={`dot task-dot ${taskTone(s, c, waiting)}`} />
                           <span className="ellipsis">{c.title}</span>
                         </button>
@@ -202,7 +242,6 @@ export default function Sidebar(p: Props) {
   );
 }
 
-/** Status colour of a task chat, from its lead's task record. */
 /**
  * Split a lead's task chats: still in play (running, queued, asking
  * permission, or awaiting a merge decision) vs. finished.
@@ -215,42 +254,13 @@ function splitTasks(lead: Session, children: Session[], waiting: Set<string>) {
   return { active: children.filter(inPlay), finished: children.filter((c) => !inPlay(c)) };
 }
 
-function taskTone(lead: Session, child: Session, waiting: Set<string>) {
-  const task = lead.tasks?.find((t) => t.id === child.parent?.taskId);
-  if (waiting.has(child.key)) return "wait";
-  if (task?.status === "running" || task?.status === "starting" || child.busy) return "run";
-  if (task?.status === "done") return "done";
-  if (task?.status === "failed") return "fail";
-  return "idle";
-}
-
-const TASK_STATE: Record<string, string> = {
-  queued: "대기열",
-  starting: "시작 중",
-  waiting_lock: "대기",
-  running: "실행 중",
-  done: "완료",
-  failed: "실패",
-  cancelled: "중단됨",
-};
-
-/** "README 갱신 · 실행 중": a task chat's title and where it stands. */
-function taskLabel(lead: Session, child: Session, waiting: Set<string>) {
-  const task = lead.tasks?.find((t) => t.id === child.parent?.taskId);
-  const state = waiting.has(child.key)
-    ? "권한 요청"
-    : task?.mergeState === "pending" && !isTaskActive(task.status)
-      ? "병합 대기"
-      : task
-        ? TASK_STATE[task.status]
-        : null;
-  return state ? `${child.title} · ${state}` : child.title;
-}
-
 type Tip = { text: string; x: number; y: number };
 
-function Rail(p: Props & { waiting: Set<string> }) {
-  // Workspaces whose chats are unfolded under their letter.
+export function Rail(p: RailProps) {
+  const contextTeams = useContext(TeamsContext);
+  const teams = p.teams ?? contextTeams;
+  const waiting = new Set(p.permissions.map((r) => sessionKey(r.agentId, r.sessionId)));
+  // Workspaces whose chats are unfolded under their letter (simple mode rail only).
   const [open, setOpen] = useState<Record<string, boolean>>(() => (p.workspace ? { [p.workspace]: true } : {}));
   // Leads whose finished tasks are unfolded.
   const [showDone, setShowDone] = useState<Record<string, boolean>>({});
@@ -265,26 +275,57 @@ function Rail(p: Props & { waiting: Set<string> }) {
     onMouseLeave: () => setTip(null),
   });
 
+  const pro = p.pro;
+  // In pro mode the logo is the way back to simple mode; the sub-sidebar opens
+  // and closes from its view buttons (and its own ×).
+  const logoTip = pro ? "심플 모드로 전환" : "사이드바 펼치기";
+  const LogoHoverIcon = pro ? Columns2 : PanelLeftOpen;
+
   return (
     <aside className="sidebar rail" onScroll={() => setTip(null)}>
       <div className="rail-top" data-tauri-drag-region>
-        <button className="rail-logo" onClick={p.onToggleRail} {...tipFor("사이드바 펼치기")}>
+        <button
+          className="rail-logo"
+          onClick={pro ? pro.onSwitchSimple : p.onToggleRail}
+          {...tipFor(logoTip)}
+        >
           <img src={logo} alt="" />
-          <PanelLeftOpen size={18} className="rail-logo-hover" />
+          <LogoHoverIcon size={18} className="rail-logo-hover" />
         </button>
       </div>
-      <button className="icon-btn rail-btn" onClick={() => p.onNewChat()} {...tipFor("새 대화")}>
-        <SquarePen size={18} />
-      </button>
+      {pro ? (
+        <>
+          <div className="rail-divider" />
+          {pro.views.map((view) => {
+            const ViewIcon = view.icon;
+            const active = pro.activeView === view.id;
+            return (
+              <button
+                key={view.id}
+                className={`icon-btn rail-btn rail-view-btn ${active ? "active" : ""}`}
+                aria-pressed={active}
+                onClick={() => pro.onToggleView(view.id)}
+                {...tipFor(view.label)}
+              >
+                <ViewIcon size={18} />
+              </button>
+            );
+          })}
+        </>
+      ) : (
+        <button className="icon-btn rail-btn" onClick={() => p.onNewChat()} {...tipFor("새 대화")}>
+          <SquarePen size={18} />
+        </button>
+      )}
 
       <div className="rail-divider" />
 
       <nav className="rail-workspaces" onScroll={() => setTip(null)}>
         {p.workspaces.map((ws) => {
           const all = p.sessions.filter((s) => s.cwd === ws);
-          const flag = all.some((s) => p.waiting.has(s.key)) ? "waiting" : all.some((s) => s.busy) ? "busy" : null;
+          const flag = all.some((s) => waiting.has(s.key)) ? "waiting" : all.some((s) => s.busy) ? "busy" : null;
           const name = baseName(ws);
-          const isOpen = !!open[ws];
+          const isOpen = pro ? ws === p.workspace : !!open[ws];
           const chats = all
             .filter((s) => !s.draft && !(s.parent && p.sessions.some((l) => l.key === s.parent!.key)))
             .sort((a, b) => b.updatedAt - a.updatedAt);
@@ -295,7 +336,7 @@ function Rail(p: Props & { waiting: Set<string> }) {
                 aria-expanded={isOpen}
                 onClick={() => {
                   p.onSelectWorkspace(ws);
-                  setOpen((o) => ({ ...o, [ws]: !o[ws] }));
+                  if (!pro) setOpen((o) => ({ ...o, [ws]: !o[ws] }));
                 }}
                 {...tipFor(p.missing.includes(ws) ? `${name} · 폴더를 찾을 수 없어요` : name)}
               >
@@ -304,7 +345,7 @@ function Rail(p: Props & { waiting: Set<string> }) {
               </button>
               {isOpen && (
                 <div className="rail-chats">
-                  {chats.length === 0 && (
+                  {!pro && chats.length === 0 && (
                     <button className="icon-btn rail-chat" onClick={() => p.onNewChat(ws)} {...tipFor("이 폴더에서 새 대화")}>
                       <SquarePen size={15} />
                     </button>
@@ -314,7 +355,7 @@ function Rail(p: Props & { waiting: Set<string> }) {
                     const { active, finished } = splitTasks(
                       c,
                       p.sessions.filter((s) => s.parent?.key === c.key).sort((a, b) => a.createdAt - b.createdAt),
-                      p.waiting,
+                      waiting,
                     );
                     const doneOpen = showDone[c.key] || finished.some((f) => f.key === p.activeKey);
                     const dot = (t: Session, done: boolean) => (
@@ -322,9 +363,9 @@ function Rail(p: Props & { waiting: Set<string> }) {
                         key={t.key}
                         className={`rail-task ${done ? "done" : ""} ${t.key === p.activeKey ? "active" : ""}`}
                         onClick={() => p.onActivate(t.key)}
-                        {...tipFor(taskLabel(c, t, p.waiting))}
+                        {...tipFor(taskLabel(c, t, waiting, teams))}
                       >
-                        <span className={`dot task-dot ${taskTone(c, t, p.waiting)}`} />
+                        <span className={`dot task-dot ${taskTone(c, t, waiting)}`} />
                       </button>
                     );
                     return (
@@ -335,7 +376,7 @@ function Rail(p: Props & { waiting: Set<string> }) {
                           {...tipFor(c.lead ? `${c.title} · 총괄` : c.title)}
                         >
                           <Icon size={15} />
-                          {p.waiting.has(c.key) ? (
+                          {waiting.has(c.key) ? (
                             <span className="rail-badge waiting" />
                           ) : (
                             c.busy && <span className="rail-badge busy" />
@@ -356,6 +397,15 @@ function Rail(p: Props & { waiting: Set<string> }) {
                       </Fragment>
                     );
                   })}
+                  {pro && (
+                    <button
+                      className="icon-btn rail-chat rail-new-chat"
+                      onClick={() => p.onNewChat(ws)}
+                      {...tipFor("새 대화")}
+                    >
+                      <Plus size={15} />
+                    </button>
+                  )}
                 </div>
               )}
             </div>

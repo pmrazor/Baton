@@ -1,17 +1,14 @@
-import { useEffect, useState } from "react";
+import { useContext, useEffect, useState } from "react";
 import { ChevronRight, Lock } from "lucide-react";
-import type { AgentInfo, PermissionRequest, TaskInfo, TaskStatus } from "../types";
+import type { AgentInfo, PermissionRequest, TaskInfo, Team } from "../types";
 import { isTaskActive, sessionKey } from "../types";
-
-const STATUS: Record<TaskStatus, { label: string; tone: string }> = {
-  queued: { label: "대기열", tone: "lock" },
-  starting: { label: "시작 중", tone: "run" },
-  waiting_lock: { label: "대기", tone: "lock" },
-  running: { label: "실행 중", tone: "run" },
-  done: { label: "완료", tone: "done" },
-  failed: { label: "실패", tone: "fail" },
-  cancelled: { label: "중단됨", tone: "lock" },
-};
+import {
+  formatReassigned,
+  memberNameMap,
+  taskStatusBadge,
+  taskSubLine,
+  TeamsContext,
+} from "./taskLabels";
 
 function clock(ms: number) {
   const s = Math.max(0, Math.floor(ms / 1000));
@@ -28,29 +25,23 @@ interface Props {
   onDiscard: (taskId: string) => void;
   /** The lead is mid-turn and may still be reviewing finished tasks. */
   leadBusy: boolean;
-}
-
-/** One line on where an isolated (worktree) task's changes stand. */
-function mergeLine(t: TaskInfo, leadBusy: boolean): string | null {
-  if (!t.isolated) return null;
-  switch (t.mergeState) {
-    case "pending":
-      return `${t.changes.length}개 파일 변경 · ${leadBusy ? "병합 검토 중" : "병합 대기"}`;
-    case "merged":
-      return "워크스페이스에 병합됨";
-    case "conflict":
-      return `충돌 ${t.conflicts.length}개 · 워크스페이스에서 해결해 주세요`;
-    case "discarded":
-      return "변경을 버렸어요";
-    case "none":
-      return "바뀐 파일 없음";
-    default:
-      return "별도 작업 폴더에서 진행";
-  }
+  teams?: Team[];
 }
 
 /** The lead's delegation summary for one turn: one row per task. */
-export default function TaskCard({ tasks, agents, permissions, onOpen, onPermission, onMerge, onDiscard, leadBusy }: Props) {
+export default function TaskCard({
+  tasks,
+  agents,
+  permissions,
+  onOpen,
+  onPermission,
+  onMerge,
+  onDiscard,
+  leadBusy,
+  teams,
+}: Props) {
+  const contextTeams = useContext(TeamsContext);
+  const memberNames = memberNameMap(teams ?? contextTeams, tasks);
   const [now, setNow] = useState(Date.now());
   const live = tasks.some((t) => isTaskActive(t.status));
   useEffect(() => {
@@ -73,24 +64,25 @@ export default function TaskCard({ tasks, agents, permissions, onOpen, onPermiss
         const key = t.sessionId ? sessionKey(t.agentId, t.sessionId) : null;
         const asks = key ? permissions.filter((p) => sessionKey(p.agentId, p.sessionId) === key) : [];
         const agent = agents.find((a) => a.id === t.agentId);
-        const st = asks.length > 0 ? { label: "권한 요청", tone: "wait" } : STATUS[t.status];
+        const st = taskStatusBadge(t, asks.length > 0);
         const time =
           t.startedAt && (t.status === "running" || t.endedAt) ? ` · ${clock((t.endedAt ?? now) - t.startedAt)}` : "";
-        const sub =
-          t.status === "waiting_lock"
-            ? "다른 작업이 파일을 수정 중이라 기다려요"
-            : t.status === "failed" && t.error
-              ? t.error
-              : (mergeLine(t, leadBusy) ?? (t.writes ? "파일 수정 작업" : "읽기 전용 작업"));
+        const sub = taskSubLine(t, leadBusy);
+        const reassignedLine = formatReassigned(t.reassigned, memberNames);
         return (
           <div key={t.id} className="task-block">
             <button className="task" disabled={!key} onClick={() => key && onOpen(key)}>
               <span className={`task-avatar agent-${t.agentId}`}>{(agent?.name ?? t.agentId).charAt(0)}</span>
               <span className="task-main">
                 <span className="task-title">{t.title}</span>
-                <span className="task-sub">
+                <span className="task-sub" title={t.error ?? undefined}>
                   {t.memberName} · {sub}
                 </span>
+                {reassignedLine && (
+                  <span className="task-sub task-reassigned" title={reassignedLine}>
+                    {reassignedLine}
+                  </span>
+                )}
               </span>
               <span className={`task-status ${st.tone}`}>
                 {t.status === "running" && asks.length === 0 && <span className="spinner" />}
