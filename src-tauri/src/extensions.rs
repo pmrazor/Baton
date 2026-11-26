@@ -652,7 +652,11 @@ mod tests {
         assert!(parse_source("ftp://example.com/index.json").is_err());
         assert!(parse_source("file:///etc/index.json").is_err());
         assert!(parse_source("relative/index.json").is_err());
-        assert!(matches!(parse_source("/tmp/reg/index.json"), Ok(Source::Local(_))));
+        // An absolute path on this platform (on Windows `/tmp/…` has no drive, so it isn't absolute).
+        let local = std::env::temp_dir().join("reg").join("index.json");
+        assert!(matches!(parse_source(&local.display().to_string()), Ok(Source::Local(_))));
+        #[cfg(windows)]
+        assert!(matches!(parse_source(r"C:\reg\index.json"), Ok(Source::Local(_))));
     }
 
     fn entry_for(id: &str, version: &str, files: &[(&str, &[u8])]) -> RegistryEntry {
