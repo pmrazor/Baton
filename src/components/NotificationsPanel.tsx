@@ -1,9 +1,7 @@
 import { useState } from "react";
-import { Bell } from "lucide-react";
 import {
   loadNotifySettings,
   saveNotifySettings,
-  sendTestNotification,
   type NoticeKind,
   type NotifySettings,
 } from "../notify";
@@ -15,12 +13,9 @@ const KINDS: [NoticeKind, string, string][] = [
   ["limit", "한도 관련", "사용 한도로 작업이 다른 팀원에게 넘어가거나 총괄이 한도에 걸리면 알려 드려요"],
 ];
 
-type TestState = "idle" | "sending" | "sent" | "denied";
-
 /** Desktop notification settings, saved per user in localStorage. */
 export default function NotificationsPanel() {
   const [settings, setSettings] = useState<NotifySettings>(loadNotifySettings);
-  const [test, setTest] = useState<TestState>("idle");
 
   const change = (patch: Partial<NotifySettings>) => {
     const next = { ...settings, ...patch };
@@ -28,25 +23,13 @@ export default function NotificationsPanel() {
     saveNotifySettings(next);
   };
 
-  const sendTest = () => {
-    setTest("sending");
-    sendTestNotification().then((ok) => setTest(ok ? "sent" : "denied"));
-  };
-
   return (
     <>
       <div className="settings-head">
         <h3>데스크톱 알림</h3>
-        <button className="btn small-btn" disabled={test === "sending"} onClick={sendTest}>
-          <Bell size={13} /> 테스트 알림 보내기
-        </button>
       </div>
       <p className="muted small">
         Baton 창을 보고 있지 않을 때만 알려 드려요. 짧은 시간에 여러 건이 생기면 하나로 묶어서 보내요.
-        {test === "sent" && " 테스트 알림을 보냈어요."}
-        {test === "denied" && (
-          <span className="error-text"> 알림 권한이 없어요. 시스템 설정에서 Baton의 알림을 허용해 주세요.</span>
-        )}
       </p>
       <ul className="settings-agents notify-list">
         <li>

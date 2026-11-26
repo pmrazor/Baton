@@ -62,6 +62,7 @@ You can hand work to team members with the baton tools:
     one at a time, fix any conflicts merge_task reports, and discard_task the rest. To keep only some of a task's
     files, pass them in merge_task's files; the rest stay in the worktree for a later merge_task or discard_task.
   - \"shared\": they run one at a time directly in the workspace.
+- When a task adds, removes or moves files or changes commands or conventions, tell that member to update AGENTS.md (if the repo has one) in the same task.
 - Use wait to collect results, then check and integrate them before answering.
 - Files the user attached are listed after their message; pass the ones a member needs in delegate's attachments.
 - Delegating is the default: the user turned on agent mode to have the team do the work. Do a task yourself only
@@ -82,6 +83,7 @@ The user turned on agent mode: split the work across your team instead of doing 
 When delegating, name the relevant files, functions, and exact checks to run so members don't have to explore.
 Tool results may carry user_messages the user typed meanwhile; follow them.
 Work alone only if the whole request is a quick question or a one-line change.
+When a task adds, removes or moves files or changes commands or conventions, tell that member to update AGENTS.md (if the repo has one) in the same task.
 ";
 
 const USER_MESSAGES_NOTE: &str = "The user sent these messages while you were working. Read them now and adjust your plan; they will not be sent again.";
@@ -95,6 +97,7 @@ const SUBTASK_PREAMBLE: &str = "\
 Start from the files and symbols the task names and read only what you need. \
 Use targeted search (rg / grep) instead of listing or reading whole directories. \
 If the repo has AGENTS.md or CLAUDE.md, rely on it for the project layout instead of re-exploring. \
+If your change adds, removes or moves files or changes commands, update AGENTS.md accordingly when it exists. \
 Finish with a short report: what you did, files you changed, and anything left undone or uncertain.";
 
 fn now_ms() -> u64 {
@@ -118,6 +121,8 @@ struct Lead {
     cwd: String,
     team_id: String,
     slots: Arc<Semaphore>,
+    /// The project guide was checked (and the lead told) already.
+    guide_checked: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
@@ -319,6 +324,7 @@ impl Orchestra {
                 cwd: cwd.into(),
                 team_id: team.id.clone(),
                 slots: Arc::new(Semaphore::new(team.max_parallel.max(1))),
+                guide_checked: false,
             },
         );
         let server = json!([{
@@ -351,7 +357,32 @@ impl Orchestra {
     /// The text to send for a user message: leads get the agent-mode note in front,
     /// naming the current team so a lead notices when the user switched it.
     /// `attachments` are listed after the text so the lead can pass them on.
-    pub fn lead_prompt(&self, agent_id: &str, session_id: &str, text: &str, attachments: &[String]) -> String {
+    /// For a lead's first real message (not a slash command): marks its guide
+    /// as checked and returns the folder to check. None afterwards or for non-leads.
+    pub fn take_guide_check(&self, agent_id: &str, session_id: &str, text: &str) -> Option<String> {
+        if text.trim_start().starts_with('/') {
+            return None;
+        }
+        let mut leads = self.leads.lock().unwrap();
+        let lead = leads
+            .values_mut()
+            .find(|l| l.agent_id == agent_id && l.session_id.as_deref() == Some(session_id))?;
+        if lead.guide_checked {
+            return None;
+        }
+        lead.guide_checked = true;
+        Some(lead.cwd.clone())
+    }
+
+    /// `guide_note` is an extra paragraph for the preamble (see `guide::guide_note`).
+    pub fn lead_prompt(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        text: &str,
+        attachments: &[String],
+        guide_note: Option<&str>,
+    ) -> String {
         let team_id = self
             .leads
             .lock()
@@ -360,7 +391,11 @@ impl Orchestra {
             .find(|l| l.agent_id == agent_id && l.session_id.as_deref() == Some(session_id))
             .map(|l| l.team_id.clone());
         let team = team_id.map(|id| self.app.state::<Teams>().get(&id).name);
-        wrap_lead_text(text, team.as_deref(), attachments)
+        let wrapped = wrap_lead_text(text, team.as_deref(), attachments);
+        match (guide_note, wrapped.strip_prefix(LEAD_PREAMBLE)) {
+            (Some(note), Some(rest)) => format!("{LEAD_PREAMBLE}{note}\n{rest}"),
+            _ => wrapped,
+        }
     }
 
     /// Switch a lead's team; applies to its next delegations.
@@ -2407,6 +2442,9 @@ mod tests {
 
         assert!(LEAD_PREAMBLE.starts_with("[Baton agent mode"));
         assert!(LEAD_PREAMBLE.contains("user_messages"));
+        assert!(LEAD_PREAMBLE.contains("update AGENTS.md (if the repo has one)"));
+        assert!(INSTRUCTIONS.contains("update AGENTS.md (if the repo has one)"));
+        assert!(SUBTASK_PREAMBLE.contains("update AGENTS.md accordingly"));
         assert!(LEAD_PREAMBLE.contains("name the relevant files, functions, and exact checks"));
     }
 

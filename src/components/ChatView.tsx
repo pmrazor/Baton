@@ -17,6 +17,7 @@ import {
 import { otherWorkInFolder } from "../concurrency";
 import Composer from "./Composer";
 import UnmergedBanner from "./UnmergedBanner";
+import GuideBanner from "./GuideBanner";
 import { ChatRootContext, ToolRow } from "./Messages";
 import { groupTurns, TurnView } from "./Turn";
 import PermissionCard from "./PermissionCard";
@@ -165,6 +166,10 @@ export function ChatBanners(p: ChatViewProps) {
     <>
       {p.banner}
       {state.workspace && <UnmergedBanner workspace={state.workspace} />}
+      <GuideBanner
+        folder={session?.cwd ?? state.workspace}
+        isAgentMode={session && !session.draft ? !!session.lead : p.agentMode}
+      />
       {session?.archived && (
         <div className="auth-banner archived-banner">
           <div>

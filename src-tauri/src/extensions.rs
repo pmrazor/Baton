@@ -243,7 +243,7 @@ fn parse_source(url: &str) -> Result<Source, FsError> {
     }
 }
 
-fn http_client() -> Result<reqwest::Client, FsError> {
+pub(crate) fn http_client() -> Result<reqwest::Client, FsError> {
     // reqwest is built without a bundled TLS provider (same as the updater plugin): install ring once.
     if rustls::crypto::CryptoProvider::get_default().is_none() {
         let _ = rustls::crypto::ring::default_provider().install_default();

@@ -173,7 +173,7 @@ fn run(dir: &Path, args: &[&str], timeout: Duration, what: &str) -> Result<Vec<u
     if out.success { Ok(out.stdout) } else { Err(failure(what, &out)) }
 }
 
-fn run_text(dir: &Path, args: &[&str], timeout: Duration, what: &str) -> Result<String, String> {
+pub(crate) fn run_text(dir: &Path, args: &[&str], timeout: Duration, what: &str) -> Result<String, String> {
     run(dir, args, timeout, what).map(|b| String::from_utf8_lossy(&b).trim().to_string())
 }
 

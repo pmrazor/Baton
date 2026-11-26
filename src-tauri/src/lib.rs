@@ -6,10 +6,12 @@ mod files;
 mod git;
 mod gitblame;
 mod gitdiff;
+mod guide;
 mod history;
 mod hub;
 mod legacy;
 mod login;
+mod mcp;
 mod orchestra;
 mod profiles;
 mod search;
@@ -58,6 +60,36 @@ fn install_agent(hub: State<'_, Hub>, agent_id: String) -> Result<(), HubError> 
 }
 
 #[tauri::command]
+fn mcp_list(mcp: State<'_, Arc<mcp::McpStore>>) -> Vec<mcp::McpServerConfig> {
+    mcp.list()
+}
+
+#[tauri::command]
+fn mcp_save(mcp: State<'_, Arc<mcp::McpStore>>, servers: Vec<mcp::McpServerConfig>) -> Result<(), String> {
+    mcp.save(servers)
+}
+
+#[tauri::command]
+async fn mcp_check(server: mcp::McpServerConfig) -> mcp::McpCheckResult {
+    mcp::check(&server).await
+}
+
+#[tauri::command]
+async fn mcp_agent_support(hub: State<'_, Hub>) -> Result<Vec<mcp::McpAgentSupport>, HubError> {
+    let mut out = Vec::new();
+    for info in hub.list().await.into_iter().filter(|a| a.installed) {
+        let http = hub.mcp_http_support(&info.id).await;
+        out.push(mcp::McpAgentSupport { agent_id: info.id, agent_name: info.name, http });
+    }
+    Ok(out)
+}
+
+#[tauri::command]
+async fn mcp_agent_own_servers() -> Vec<mcp::McpAgentOwnServer> {
+    tokio::task::spawn_blocking(mcp::own_servers).await.unwrap_or_default()
+}
+
+#[tauri::command]
 fn agents_config_path(app: tauri::AppHandle) -> Result<String, String> {
     let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
     Ok(agents::config_path(&dir).display().to_string())
@@ -97,7 +129,15 @@ async fn send_prompt(
     attachments: Option<Vec<String>>,
 ) -> Result<Value, HubError> {
     let attachments = attachments.unwrap_or_default();
-    let text = orchestra.lead_prompt(&agent_id, &session_id, &text, &attachments);
+    // First message of a lead: check the project guide (git work, off the async runtime).
+    let note = match orchestra.take_guide_check(&agent_id, &session_id, &text) {
+        Some(cwd) => tokio::task::spawn_blocking(move || guide::guide_note(&guide::status(&cwd)))
+            .await
+            .ok()
+            .flatten(),
+        None => None,
+    };
+    let text = orchestra.lead_prompt(&agent_id, &session_id, &text, &attachments, note.as_deref());
     hub.prompt(&agent_id, &session_id, &text, &attachments).await
 }
 
@@ -516,7 +556,9 @@ pub fn run() {
             });
             let profiles = Arc::new(Profiles::load(&dir, &app.path().app_data_dir()?));
             let options_file = dir.join("agent-options.json");
-            app.manage(Hub::new(app.handle().clone(), defs, profiles.clone(), options_file));
+            let mcp = Arc::new(mcp::McpStore::load(&dir));
+            app.manage(Hub::new(app.handle().clone(), defs, profiles.clone(), mcp.clone(), options_file));
+            app.manage(mcp);
             app.manage(profiles);
             app.manage(Teams::load(&dir));
             app.manage(Orchestra::start(app.handle().clone())?);
@@ -531,8 +573,16 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            guide::guide_status,
+            guide::set_guide_mode,
             list_agents,
             agents_config_path,
+            mcp_list,
+            mcp_save,
+            mcp_check,
+            mcp_agent_support,
+            mcp_agent_own_servers,
+            mcp::mcp_parse_toml,
             new_session,
             resume_session,
             new_lead_session,

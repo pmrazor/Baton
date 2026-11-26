@@ -229,7 +229,7 @@ pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// On Windows, `npx` and friends are `.cmd` shims that `CreateProcess` cannot
 /// launch directly, so route everything through `cmd /C`, without a window.
-fn platform_command(command: &str, args: &[String]) -> Command {
+pub(crate) fn platform_command(command: &str, args: &[String]) -> Command {
     if cfg!(windows) {
         let mut cmd = Command::new("cmd");
         cmd.arg("/C").arg(command).args(args);

@@ -193,6 +193,15 @@ export interface GitCommitFile {
   origPath?: string;
 }
 
+/** Project guide (AGENTS.md) state for a folder. */
+export interface GuideStatus {
+  exists: boolean;
+  file: string | null;
+  mode: "ask" | "auto" | "off";
+  /** Guide sections that look out of date. */
+  stale: string[];
+}
+
 export const api = {
   listAgents: () => invoke<AgentInfo[]>("list_agents"),
   agentsConfigPath: () => invoke<string>("agents_config_path"),
@@ -215,6 +224,8 @@ export const api = {
   applyUnmerged: (workspace: string, file: string) =>
     invoke<ApplyOutcome>("apply_unmerged", { workspace, file }),
   deleteUnmerged: (workspace: string, file: string) => invoke<void>("delete_unmerged", { workspace, file }),
+  guideStatus: (folder: string) => invoke<GuideStatus>("guide_status", { folder }),
+  setGuideMode: (folder: string, mode: GuideStatus["mode"]) => invoke<void>("set_guide_mode", { folder, mode }),
   listAgentSessions: (cwd: string) => invoke<AgentSessionInfo[]>("list_agent_sessions", { cwd }),
   importSession: (agentId: string, sessionId: string, cwd: string, launch: Launch, teamId: string | null) =>
     invoke<ImportResult>("import_session", { agentId, sessionId, cwd, launch, teamId }),

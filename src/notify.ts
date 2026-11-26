@@ -242,8 +242,3 @@ export const notifier = createNotifier({
   isFocused: isAppFocused,
   settings: loadNotifySettings,
 });
-
-/** From settings: one notice right away, focused or not. False when the OS doesn't allow it. */
-export function sendTestNotification(): Promise<boolean> {
-  return sendDesktop({ title: "Baton", body: "테스트 알림이에요. 알림이 이렇게 보여요." });
-}

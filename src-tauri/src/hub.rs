@@ -69,6 +69,7 @@ pub struct Hub {
     app: AppHandle,
     defs: Vec<AgentDef>,
     profiles: Arc<Profiles>,
+    mcp: Arc<crate::mcp::McpStore>,
     /// runtime key → process slot
     slots: std::sync::Mutex<HashMap<String, Slot>>,
     /// (agent id, session id) → home
@@ -151,7 +152,7 @@ pub struct InstallInfo {
 }
 
 impl Hub {
-    pub fn new(app: AppHandle, defs: Vec<AgentDef>, profiles: Arc<Profiles>, options_file: std::path::PathBuf) -> Self {
+    pub fn new(app: AppHandle, defs: Vec<AgentDef>, profiles: Arc<Profiles>, mcp: Arc<crate::mcp::McpStore>, options_file: std::path::PathBuf) -> Self {
         let options = std::fs::read(&options_file)
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
@@ -160,6 +161,7 @@ impl Hub {
             app,
             defs,
             profiles,
+            mcp,
             slots: Default::default(),
             homes: Default::default(),
             quotas: Default::default(),
@@ -171,6 +173,26 @@ impl Hub {
             usage_checked: Default::default(),
             lead_tool_calls: Default::default(),
         }
+    }
+
+    /// `base` (the session's own MCP servers) plus the enabled shared servers;
+    /// http ones only when this agent's `initialize` advertised support.
+    fn with_shared_mcp(&self, rt: &AgentRuntime, base: &Value) -> Value {
+        let http_ok = rt.init.pointer("/agentCapabilities/mcpCapabilities/http").and_then(Value::as_bool) == Some(true);
+        crate::mcp::merge_shared(base.clone(), &self.mcp.enabled(), http_ok)
+    }
+
+    /// Whether this agent takes http MCP servers: None until one of its
+    /// processes has started (its `initialize` result says).
+    pub async fn mcp_http_support(&self, agent_id: &str) -> Option<bool> {
+        let mut seen = None;
+        for slot in self.agent_slots(agent_id) {
+            if let Some(rt) = slot.lock().await.as_ref() {
+                let ok = rt.init.pointer("/agentCapabilities/mcpCapabilities/http").and_then(Value::as_bool) == Some(true);
+                seen = Some(seen.unwrap_or(false) || ok);
+            }
+        }
+        seen
     }
 
     pub fn def(&self, agent_id: &str) -> Result<&AgentDef, HubError> {
@@ -351,7 +373,7 @@ impl Hub {
         meta: Value,
     ) -> Result<Value, HubError> {
         let (key, rt) = self.runtime(agent_id, cwd, launch).await?;
-        let mut params = json!({ "cwd": cwd, "mcpServers": mcp_servers });
+        let mut params = json!({ "cwd": cwd, "mcpServers": self.with_shared_mcp(&rt, &mcp_servers) });
         if !meta.is_null() {
             params["_meta"] = meta.clone();
         }
@@ -414,7 +436,8 @@ impl Hub {
             self.remember(agent_id, session_id, home, &rt);
             return Ok(json!({ "alreadyActive": true }));
         }
-        let mut params = json!({ "sessionId": session_id, "cwd": cwd, "mcpServers": mcp_servers });
+        let mut params =
+            json!({ "sessionId": session_id, "cwd": cwd, "mcpServers": self.with_shared_mcp(&rt, &mcp_servers) });
         if !meta.is_null() {
             params["_meta"] = meta;
         }
@@ -471,7 +494,8 @@ impl Hub {
 
         let capture_key = (agent_id.to_string(), session_id.to_string());
         self.captures.lock().unwrap().insert(capture_key.clone(), Vec::new());
-        let mut params = json!({ "sessionId": session_id, "cwd": cwd, "mcpServers": mcp_servers });
+        let mut params =
+            json!({ "sessionId": session_id, "cwd": cwd, "mcpServers": self.with_shared_mcp(&rt, &mcp_servers) });
         if !meta.is_null() {
             params["_meta"] = meta.clone();
         }

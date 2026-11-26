@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Download, RefreshCw, Search, Trash2 } from "lucide-react";
+import { Check, Download, RefreshCw, Search, Trash2 } from "lucide-react";
 import { toHubError } from "../api";
 import {
   DEFAULT_REGISTRY_URL,
@@ -327,7 +327,10 @@ export default function ExtensionsPanel() {
                       {busy === "install" ? "업데이트 중…" : `업데이트 (${entry.version})`}
                     </button>
                   ) : (
-                    <span className="ext-installed-badge small">설치됨</span>
+                    <button type="button" className="btn small-btn" disabled>
+                      <Check size={13} />
+                      설치됨
+                    </button>
                   )}
                 </div>
               </li>
