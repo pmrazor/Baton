@@ -1,0 +1,31 @@
+{
+  "id": "lang-java",
+  "name": "Java",
+  "version": "1.0.0",
+  "description": "Java syntax highlighting",
+  "publisher": "baton",
+  "contributes": {
+    "languages": [
+      {
+        "id": "java",
+        "name": "Java",
+        "extensions": [
+          ".java"
+        ],
+        "comments": {
+          "line": "//",
+          "block": [
+            "/*",
+            "*/"
+          ]
+        },
+        "grammar": {
+          "legacyMode": {
+            "mode": "clike",
+            "export": "java"
+          }
+        }
+      }
+    ]
+  }
+}

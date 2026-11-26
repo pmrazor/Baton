@@ -13,6 +13,7 @@ import { ask } from "@tauri-apps/plugin-dialog";
 import { api, toFsError, type FsError, type GitDiffTexts } from "../../api";
 import { attachToComposer, insertIntoComposer } from "../../composerBus";
 import ContextMenu from "../ContextMenu";
+import ExtensionHintBar from "./ExtensionHintBar";
 import { readBlamePref, writeBlamePref } from "./blameGutter";
 import {
   buildEditorMenuSections,
@@ -1504,6 +1505,14 @@ export default function CodeEditor({ root }: CodeEditorProps) {
           </div>
         </div>
       )}
+
+      <ExtensionHintBar
+        path={
+          activeTab && !isDiffTab && activeRuntime?.load.status === "ready"
+            ? activeTab.path
+            : null
+        }
+      />
 
       <div className="code-editor-body">
         {activeTab && isDiffTab ? (

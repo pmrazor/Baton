@@ -1,0 +1,31 @@
+{
+  "id": "lang-sql",
+  "name": "SQL",
+  "version": "1.0.0",
+  "description": "SQL syntax highlighting",
+  "publisher": "baton",
+  "contributes": {
+    "languages": [
+      {
+        "id": "sql",
+        "name": "SQL",
+        "extensions": [
+          ".sql"
+        ],
+        "comments": {
+          "line": "--",
+          "block": [
+            "/*",
+            "*/"
+          ]
+        },
+        "grammar": {
+          "legacyMode": {
+            "mode": "sql",
+            "export": "standardSQL"
+          }
+        }
+      }
+    ]
+  }
+}

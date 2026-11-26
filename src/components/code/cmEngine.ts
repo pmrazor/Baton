@@ -32,6 +32,8 @@ import { highlightSelectionMatches, search, searchKeymap } from "@codemirror/sea
 import { closeBrackets, closeBracketsKeymap } from "@codemirror/autocomplete";
 import { tags } from "@lezer/highlight";
 import { languageForPath, type LanguageId } from "./codeHelpers";
+import { isExtensionLanguageId, loadExtensionLanguage } from "../../extensions/languages";
+import { onExtensionsChanged } from "../../extensions/registry";
 import { onTabClosed, onTabRenamed } from "./editorStore";
 import { gitChangeGutter, setGitBase } from "./gitGutter";
 import { applyBlameHunks, blameExtension, blameStamp, configureBlame } from "./blameGutter";
@@ -64,6 +66,8 @@ export interface TabSession {
   langCompartment: Compartment;
   lineSepCompartment: Compartment;
   langLoaded: boolean;
+  langId: LanguageId;
+  langVersion: number;
 }
 
 const ExternalReload = Annotation.define<boolean>();
@@ -103,6 +107,7 @@ onTabRenamed((root, from, to) => {
   sessions.set(newKey, session);
 
   if (prevLang !== nextLang) {
+    session.langVersion++;
     session.langLoaded = false;
     if (nextLang === null) {
       const effect = session.langCompartment.reconfigure([]);
@@ -112,6 +117,33 @@ onTabRenamed((root, from, to) => {
       } else {
         session.state = session.state.update({ effects: effect }).state;
       }
+      session.langId = null;
+      session.langLoaded = true;
+    } else {
+      void attachLanguage(session, view);
+    }
+  }
+});
+
+onExtensionsChanged(() => {
+  for (const key of [...langCache.keys()]) {
+    if (isExtensionLanguageId(key)) langCache.delete(key);
+  }
+  for (const session of sessions.values()) {
+    const nextLang = languageForPath(session.path);
+    if (session.langId === nextLang && !isExtensionLanguageId(nextLang)) continue;
+    session.langVersion++;
+    session.langLoaded = false;
+    const view = activeViews.get(session.key) ?? null;
+    if (nextLang === null) {
+      const effect = session.langCompartment.reconfigure([]);
+      if (view && viewMeta.get(view)?.key === session.key) {
+        view.dispatch({ effects: effect });
+        session.state = view.state;
+      } else {
+        session.state = session.state.update({ effects: effect }).state;
+      }
+      session.langId = null;
       session.langLoaded = true;
     } else {
       void attachLanguage(session, view);
@@ -286,6 +318,9 @@ export async function loadLanguageExtension(lang: Exclude<LanguageId, null>): Pr
   let promise = langCache.get(lang);
   if (!promise) {
     promise = (async (): Promise<Extension> => {
+      if (isExtensionLanguageId(lang)) {
+        return loadExtensionLanguage(lang);
+      }
       switch (lang) {
         case "typescript": {
           const { javascript } = await import("@codemirror/lang-javascript");
@@ -454,6 +489,8 @@ export function ensureTabSession(
     langCompartment,
     lineSepCompartment,
     langLoaded: false,
+    langId: null,
+    langVersion: 0,
   };
   sessions.set(key, session);
   void attachLanguage(session, activeView);
@@ -462,20 +499,26 @@ export function ensureTabSession(
 
 async function attachLanguage(session: TabSession, maybeView: EditorView | null): Promise<void> {
   if (session.langLoaded) return;
+  const ver = session.langVersion;
   const lang = languageForPath(session.path);
   if (!lang) {
+    session.langId = null;
     session.langLoaded = true;
     return;
   }
   try {
     const ext = await loadLanguageExtension(lang);
     const current = sessions.get(session.key);
-    if (!current || current !== session || current.langLoaded) return;
+    if (!current || current !== session || current.langVersion !== ver || current.langLoaded) return;
+    current.langId = lang;
     current.langLoaded = true;
     const effect = current.langCompartment.reconfigure(ext);
-    if (maybeView && viewMeta.get(maybeView)?.key === session.key) {
-      maybeView.dispatch({ effects: effect });
-      current.state = maybeView.state;
+    const targetView =
+      activeViews.get(session.key) ??
+      (maybeView && viewMeta.get(maybeView)?.key === session.key ? maybeView : null);
+    if (targetView && viewMeta.get(targetView)?.key === session.key) {
+      targetView.dispatch({ effects: effect });
+      current.state = targetView.state;
     } else {
       current.state = current.state.update({ effects: effect }).state;
     }

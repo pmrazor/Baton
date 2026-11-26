@@ -1,0 +1,32 @@
+{
+  "id": "lang-powershell",
+  "name": "PowerShell",
+  "version": "1.0.0",
+  "description": "PowerShell syntax highlighting",
+  "publisher": "baton",
+  "contributes": {
+    "languages": [
+      {
+        "id": "powershell",
+        "name": "PowerShell",
+        "extensions": [
+          ".ps1",
+          ".psm1"
+        ],
+        "comments": {
+          "line": "#",
+          "block": [
+            "<#",
+            "#>"
+          ]
+        },
+        "grammar": {
+          "legacyMode": {
+            "mode": "powershell",
+            "export": "powerShell"
+          }
+        }
+      }
+    ]
+  }
+}

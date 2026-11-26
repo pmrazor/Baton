@@ -123,9 +123,18 @@ struct Lead {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskUsage {
+    /// Input not served from the prompt cache (ACP `inputTokens`).
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cached_read_tokens: u64,
+    pub cached_write_tokens: u64,
+}
+
+impl TaskUsage {
+    /// Everything the model read: fresh input plus cache reads and writes.
+    fn read_tokens(&self) -> u64 {
+        self.input_tokens.saturating_add(self.cached_read_tokens).saturating_add(self.cached_write_tokens)
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -874,13 +883,15 @@ fn add_usage(acc: Option<TaskUsage>, response: &Value) -> Option<TaskUsage> {
     let input = usage.get("inputTokens").and_then(Value::as_u64);
     let output = usage.get("outputTokens").and_then(Value::as_u64);
     let cached = usage.get("cachedReadTokens").and_then(Value::as_u64);
-    if input.is_none() && output.is_none() && cached.is_none() {
+    let written = usage.get("cachedWriteTokens").and_then(Value::as_u64);
+    if input.is_none() && output.is_none() && cached.is_none() && written.is_none() {
         return acc;
     }
     let mut total = acc.unwrap_or_default();
     total.input_tokens = total.input_tokens.saturating_add(input.unwrap_or(0));
     total.output_tokens = total.output_tokens.saturating_add(output.unwrap_or(0));
     total.cached_read_tokens = total.cached_read_tokens.saturating_add(cached.unwrap_or(0));
+    total.cached_write_tokens = total.cached_write_tokens.saturating_add(written.unwrap_or(0));
     Some(total)
 }
 
@@ -910,11 +921,13 @@ fn format_tokens(n: u64) -> String {
 }
 
 /// Compact one-line token summary for the lead's MCP task report.
+/// `read` counts cache hits too: Claude reports most of a turn's input as cache reads.
 fn format_tokens_report(u: TaskUsage) -> String {
-    let mut out = format!("in {} · out {}", format_tokens(u.input_tokens), format_tokens(u.output_tokens));
+    let mut out = format!("read {}", format_tokens(u.read_tokens()));
     if u.cached_read_tokens > 0 {
-        out.push_str(&format!(" · cached {}", format_tokens(u.cached_read_tokens)));
+        out.push_str(&format!(" (cached {})", format_tokens(u.cached_read_tokens)));
     }
+    out.push_str(&format!(" · out {}", format_tokens(u.output_tokens)));
     out
 }
 
@@ -2310,6 +2323,7 @@ mod tests {
                 input_tokens: 120_000,
                 output_tokens: 8_000,
                 cached_read_tokens: 95_000,
+                cached_write_tokens: 0,
             }),
         };
         let serialized = serde_json::to_value(&info).unwrap();
@@ -2320,7 +2334,7 @@ mod tests {
         assert_eq!(serialized["limitHit"], json!(true));
         assert_eq!(
             serialized["usage"],
-            json!({ "inputTokens": 120_000, "outputTokens": 8_000, "cachedReadTokens": 95_000 })
+            json!({ "inputTokens": 120_000, "outputTokens": 8_000, "cachedReadTokens": 95_000, "cachedWriteTokens": 0 })
         );
     }
 
@@ -2338,7 +2352,7 @@ mod tests {
         );
         assert_eq!(
             first,
-            Some(TaskUsage { input_tokens: 40_000, output_tokens: 2_500, cached_read_tokens: 0 })
+            Some(TaskUsage { input_tokens: 40_000, output_tokens: 2_500, cached_read_tokens: 0, ..Default::default() })
         );
 
         // Follow-up or reassigned member's turn sums into the running total.
@@ -2348,7 +2362,7 @@ mod tests {
         );
         assert_eq!(
             second,
-            Some(TaskUsage { input_tokens: 120_000, output_tokens: 8_000, cached_read_tokens: 95_000 })
+            Some(TaskUsage { input_tokens: 120_000, output_tokens: 8_000, cached_read_tokens: 95_000, ..Default::default() })
         );
 
         // A later turn that omits usage preserves the accumulated total.
@@ -2371,13 +2385,13 @@ mod tests {
         let without = task_report(&task, 5000);
         assert!(without.get("tokens").is_none());
 
-        task.info.usage = Some(TaskUsage { input_tokens: 120_000, output_tokens: 8_000, cached_read_tokens: 95_000 });
+        task.info.usage = Some(TaskUsage { input_tokens: 120_000, output_tokens: 8_000, cached_read_tokens: 95_000, ..Default::default() });
         let with_cached = task_report(&task, 5000);
-        assert_eq!(with_cached["tokens"], json!("in 120k · out 8k · cached 95k"));
+        assert_eq!(with_cached["tokens"], json!("read 215k (cached 95k) · out 8k"));
 
-        task.info.usage = Some(TaskUsage { input_tokens: 850, output_tokens: 42, cached_read_tokens: 0 });
+        task.info.usage = Some(TaskUsage { input_tokens: 850, output_tokens: 42, cached_read_tokens: 0, ..Default::default() });
         let without_cached = task_report(&task, 5000);
-        assert_eq!(without_cached["tokens"], json!("in 850 · out 42"));
+        assert_eq!(without_cached["tokens"], json!("read 850 · out 42"));
     }
 
     #[test]

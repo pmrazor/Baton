@@ -1,0 +1,30 @@
+{
+  "id": "lang-swift",
+  "name": "Swift",
+  "version": "1.0.0",
+  "description": "Swift syntax highlighting",
+  "publisher": "baton",
+  "contributes": {
+    "languages": [
+      {
+        "id": "swift",
+        "name": "Swift",
+        "extensions": [
+          ".swift"
+        ],
+        "comments": {
+          "line": "//",
+          "block": [
+            "/*",
+            "*/"
+          ]
+        },
+        "grammar": {
+          "legacyMode": {
+            "mode": "swift"
+          }
+        }
+      }
+    ]
+  }
+}

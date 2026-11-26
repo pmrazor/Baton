@@ -5,6 +5,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { api, toHubError } from "../api";
 import TeamsPanel from "./TeamsPanel";
 import AboutPanel from "./AboutPanel";
+import ExtensionsPanel from "./ExtensionsPanel";
 import NotificationsPanel from "./NotificationsPanel";
 import type { State } from "../store";
 import { accountKey, DEFAULT_PROFILE, type AgentInfo, type AgentStatus } from "../types";
@@ -26,12 +27,13 @@ interface Props {
   onClose: () => void;
 }
 
-export type SettingsTab = "accounts" | "teams" | "agents" | "notifications" | "about";
+export type SettingsTab = "accounts" | "teams" | "agents" | "extensions" | "notifications" | "about";
 
 const SETTINGS_TABS: [SettingsTab, string][] = [
   ["accounts", "계정"],
   ["teams", "팀"],
   ["agents", "에이전트"],
+  ["extensions", "확장"],
   ["notifications", "알림"],
   ["about", "정보"],
 ];
@@ -78,6 +80,8 @@ export default function SettingsModal({
             .map((a) => <AgentAccounts key={a.id} agent={a} state={state} onChanged={onProfilesChanged} />)}
 
         {tab === "teams" && <TeamsPanel state={state} onChanged={onTeamsChanged} />}
+
+        {tab === "extensions" && <ExtensionsPanel />}
 
         {tab === "notifications" && <NotificationsPanel />}
 

@@ -1,0 +1,36 @@
+{
+  "id": "lang-ruby",
+  "name": "Ruby",
+  "version": "1.0.0",
+  "description": "Ruby syntax highlighting",
+  "publisher": "baton",
+  "contributes": {
+    "languages": [
+      {
+        "id": "ruby",
+        "name": "Ruby",
+        "extensions": [
+          ".rb",
+          ".rake",
+          ".gemspec"
+        ],
+        "filenames": [
+          "Gemfile",
+          "Rakefile"
+        ],
+        "comments": {
+          "line": "#",
+          "block": [
+            "=begin",
+            "=end"
+          ]
+        },
+        "grammar": {
+          "legacyMode": {
+            "mode": "ruby"
+          }
+        }
+      }
+    ]
+  }
+}

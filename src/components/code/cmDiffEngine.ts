@@ -49,7 +49,9 @@ import {
   placeCursorAtCoordsIfEmpty,
   type EditorSelectionInfo,
 } from "./cmEngine";
-import { languageForPath, parseDiffTabId } from "./codeHelpers";
+import { languageForPath, parseDiffTabId, type LanguageId } from "./codeHelpers";
+import { isExtensionLanguageId } from "../../extensions/languages";
+import { onExtensionsChanged } from "../../extensions/registry";
 import { onTabClosed, onTabRenamed } from "./editorStore";
 
 export type DiffViewMode = "split" | "unified";
@@ -100,6 +102,8 @@ export interface DiffSession {
   scrollTop: number;
   scrollLeft: number;
   langLoaded: boolean;
+  langId: LanguageId;
+  langVersion: number;
   handle: DiffViewHandle;
   callbacks: DiffCallbacks;
 }
@@ -420,15 +424,18 @@ function buildHandle(
 
 async function attachDiffLanguage(session: DiffSession): Promise<void> {
   if (session.langLoaded) return;
+  const ver = session.langVersion;
   const lang = languageForPath(session.path);
   if (!lang) {
+    session.langId = null;
     session.langLoaded = true;
     return;
   }
   try {
     const ext = await loadLanguageExtension(lang);
     const current = diffSessions.get(session.key);
-    if (!current || current !== session || current.langLoaded) return;
+    if (!current || current !== session || current.langVersion !== ver || current.langLoaded) return;
+    current.langId = lang;
     current.langLoaded = true;
     applyLanguageExtension(current.handle, ext);
   } catch {
@@ -472,9 +479,27 @@ onTabRenamed((root, fromId, toId) => {
   diffSessions.set(newKey, session);
 
   if (prevLang !== nextLang) {
+    session.langVersion++;
     session.langLoaded = false;
     if (nextLang === null) {
       applyLanguageExtension(session.handle, []);
+      session.langId = null;
+      session.langLoaded = true;
+    } else {
+      void attachDiffLanguage(session);
+    }
+  }
+});
+
+onExtensionsChanged(() => {
+  for (const session of diffSessions.values()) {
+    const nextLang = languageForPath(session.path);
+    if (session.langId === nextLang && !isExtensionLanguageId(nextLang)) continue;
+    session.langVersion++;
+    session.langLoaded = false;
+    if (nextLang === null) {
+      applyLanguageExtension(session.handle, []);
+      session.langId = null;
       session.langLoaded = true;
     } else {
       void attachDiffLanguage(session);
@@ -533,6 +558,8 @@ export function ensureDiffSession(
     scrollTop: 0,
     scrollLeft: 0,
     langLoaded: false,
+    langId: null,
+    langVersion: 0,
     handle,
     callbacks,
   };
@@ -671,6 +698,7 @@ export function setDiffSessionMode(key: string, nextMode: DiffViewMode): void {
     doc: session.savedModifiedText,
     extensions: [EditorState.lineSeparator.of(lineSeparatorOf(session.savedModifiedText))],
   }).doc;
+  session.langVersion++;
   session.langLoaded = false;
 
   const nextPrimary = primaryEditorView(nextHandle);

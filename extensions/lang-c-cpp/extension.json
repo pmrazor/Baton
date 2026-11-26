@@ -1,0 +1,56 @@
+{
+  "id": "lang-c-cpp",
+  "name": "C/C++",
+  "version": "1.0.0",
+  "description": "C and C++ syntax highlighting",
+  "publisher": "baton",
+  "contributes": {
+    "languages": [
+      {
+        "id": "c",
+        "name": "C",
+        "extensions": [
+          ".c",
+          ".h"
+        ],
+        "comments": {
+          "line": "//",
+          "block": [
+            "/*",
+            "*/"
+          ]
+        },
+        "grammar": {
+          "legacyMode": {
+            "mode": "clike",
+            "export": "c"
+          }
+        }
+      },
+      {
+        "id": "cpp",
+        "name": "C++",
+        "extensions": [
+          ".cc",
+          ".cpp",
+          ".cxx",
+          ".hpp",
+          ".hh"
+        ],
+        "comments": {
+          "line": "//",
+          "block": [
+            "/*",
+            "*/"
+          ]
+        },
+        "grammar": {
+          "legacyMode": {
+            "mode": "clike",
+            "export": "cpp"
+          }
+        }
+      }
+    ]
+  }
+}

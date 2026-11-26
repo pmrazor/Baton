@@ -1,0 +1,32 @@
+{
+  "id": "lang-kotlin",
+  "name": "Kotlin",
+  "version": "1.0.0",
+  "description": "Kotlin syntax highlighting",
+  "publisher": "baton",
+  "contributes": {
+    "languages": [
+      {
+        "id": "kotlin",
+        "name": "Kotlin",
+        "extensions": [
+          ".kt",
+          ".kts"
+        ],
+        "comments": {
+          "line": "//",
+          "block": [
+            "/*",
+            "*/"
+          ]
+        },
+        "grammar": {
+          "legacyMode": {
+            "mode": "clike",
+            "export": "kotlin"
+          }
+        }
+      }
+    ]
+  }
+}

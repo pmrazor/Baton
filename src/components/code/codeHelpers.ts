@@ -1,7 +1,14 @@
 // Pure helpers for the file tree and code editor. Kept free of CodeMirror and
 // Tauri imports so tests stay fast and the main bundle stays small.
 
-export type LanguageId =
+import {
+  findExtensionLanguageForPath,
+  isExtensionLanguageId,
+  languageIdFromExtensionLang,
+  type ExtensionLanguageId,
+} from "../../extensions/languages";
+
+export type BuiltInLanguageId =
   | "typescript"
   | "tsx"
   | "javascript"
@@ -13,8 +20,11 @@ export type LanguageId =
   | "html"
   | "markdown"
   | "yaml"
-  | "toml"
-  | null;
+  | "toml";
+
+export type { ExtensionLanguageId };
+
+export type LanguageId = BuiltInLanguageId | ExtensionLanguageId | null;
 
 /** Normalize a relative path to `/`-separated form without leading `./` or `/`. */
 export function normalizeRelativePath(rel: string): string {
@@ -154,7 +164,7 @@ export function findContainingRoot(
   return best ? { root: best.root, path: best.path } : null;
 }
 
-const EXT_TO_LANG: Record<string, Exclude<LanguageId, null>> = {
+const EXT_TO_LANG: Record<string, BuiltInLanguageId> = {
   ts: "typescript",
   mts: "typescript",
   cts: "typescript",
@@ -183,7 +193,7 @@ const EXT_TO_LANG: Record<string, Exclude<LanguageId, null>> = {
   toml: "toml",
 };
 
-const BASENAME_TO_LANG: Record<string, Exclude<LanguageId, null>> = {
+const BASENAME_TO_LANG: Record<string, BuiltInLanguageId> = {
   "cargo.lock": "toml",
 };
 
@@ -192,9 +202,11 @@ export function languageForPath(path: string): LanguageId {
   const base = fileName(path).toLowerCase();
   if (base in BASENAME_TO_LANG) return BASENAME_TO_LANG[base];
   const dot = base.lastIndexOf(".");
-  if (dot <= 0 || dot === base.length - 1) return null;
-  const ext = base.slice(dot + 1);
-  return EXT_TO_LANG[ext] ?? null;
+  if (dot > 0 && dot < base.length - 1) {
+    const ext = base.slice(dot + 1);
+    if (ext in EXT_TO_LANG) return EXT_TO_LANG[ext];
+  }
+  return findExtensionLanguageForPath(path);
 }
 
 /** Pick the next active tab after closing `closing`: keep `active` if it stays,
@@ -645,7 +657,9 @@ export function formatPathWithLines(relPath: string, startLine: number, endLine?
 /** Markdown code-fence language tag derived from a file path, or `""` for plain text. */
 export function fenceLanguageForPath(path: string): string {
   const cmLang = languageForPath(path);
-  if (cmLang) return cmLang;
+  if (cmLang) {
+    return isExtensionLanguageId(cmLang) ? languageIdFromExtensionLang(cmLang) : cmLang;
+  }
   const base = fileName(path).toLowerCase();
   if (base in EXTRA_BASENAME_TO_FENCE) return EXTRA_BASENAME_TO_FENCE[base];
   const dot = base.lastIndexOf(".");

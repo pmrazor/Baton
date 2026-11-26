@@ -10,6 +10,7 @@ import {
   History,
   Lock,
   MessageSquare,
+  MoreHorizontal,
   PanelLeft,
   PanelLeftOpen,
   Plus,
@@ -82,6 +83,8 @@ export default function Sidebar(p: Props) {
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   // Leads whose finished tasks are unfolded.
   const [showDone, setShowDone] = useState<Record<string, boolean>>({});
+  // Leads whose older finished tasks (beyond the recent few) are unfolded too.
+  const [showAllDone, setShowAllDone] = useState<Record<string, boolean>>({});
   const waiting = new Set(p.permissions.map((r) => sessionKey(r.agentId, r.sessionId)));
 
   if (p.rail) return <Rail {...p} />;
@@ -209,6 +212,7 @@ export default function Sidebar(p: Props) {
                     );
                     // Keep the open chat visible even if its group is folded.
                     const open = showDone[s.key] || finished.some((c) => c.key === p.activeKey);
+                    const recent = recentFinished(finished, !!showAllDone[s.key], p.activeKey);
                     return (
                       <>
                         {active.map((c) => row(c, false))}
@@ -227,7 +231,28 @@ export default function Sidebar(p: Props) {
                             </button>
                           </div>
                         )}
-                        {open && finished.map((c) => row(c, true))}
+                        {open && recent.shown.map((c) => row(c, true))}
+                        {open && finished.length > RECENT_DONE_LIMIT && (
+                          <div className="session-row child done-toggle">
+                            <button
+                              className="session-main"
+                              onClick={() => {
+                                if (recent.expanded) {
+                                  // Folding away an older task being viewed goes back to its lead.
+                                  if (recent.activeOlder) p.onActivate(s.key);
+                                  setShowAllDone((o) => ({ ...o, [s.key]: false }));
+                                } else {
+                                  setShowAllDone((o) => ({ ...o, [s.key]: true }));
+                                }
+                              }}
+                            >
+                              <MoreHorizontal size={13} />
+                              <span className="ellipsis">
+                                {recent.expanded ? "이전 작업 접기" : `이전 작업 ${recent.hidden}개 더 보기`}
+                              </span>
+                            </button>
+                          </div>
+                        )}
                       </>
                     );
                   })()}
@@ -258,6 +283,27 @@ function splitTasks(lead: Session, children: Session[], waiting: Set<string>) {
   return { active: children.filter(inPlay), finished: children.filter((c) => !inPlay(c)) };
 }
 
+/** How many finished task chats a lead lists before "이전 작업 N개 더 보기". */
+export const RECENT_DONE_LIMIT = 10;
+
+/**
+ * Pick the finished task chats to list. `finished` is oldest first, so the
+ * most recent ones are at the end; their order is kept. The older ones stay
+ * visible when asked for or when the open chat is among them.
+ */
+export function recentFinished(
+  finished: Session[],
+  showAll: boolean,
+  activeKey: string | null,
+  limit = RECENT_DONE_LIMIT,
+): { shown: Session[]; hidden: number; expanded: boolean; activeOlder: boolean } {
+  if (finished.length <= limit) return { shown: finished, hidden: 0, expanded: false, activeOlder: false };
+  const cut = finished.length - limit;
+  const activeOlder = activeKey !== null && finished.slice(0, cut).some((c) => c.key === activeKey);
+  if (showAll || activeOlder) return { shown: finished, hidden: 0, expanded: true, activeOlder };
+  return { shown: finished.slice(cut), hidden: cut, expanded: false, activeOlder: false };
+}
+
 type Tip = { text: string; x: number; y: number };
 
 export function Rail(p: RailProps) {
@@ -268,6 +314,8 @@ export function Rail(p: RailProps) {
   const [open, setOpen] = useState<Record<string, boolean>>(() => (p.workspace ? { [p.workspace]: true } : {}));
   // Leads whose finished tasks are unfolded.
   const [showDone, setShowDone] = useState<Record<string, boolean>>({});
+  // Leads whose older finished tasks (beyond the recent few) are unfolded too.
+  const [showAllDone, setShowAllDone] = useState<Record<string, boolean>>({});
   // The rail scrolls, which would clip a CSS tooltip, so draw one fixed beside the hovered item.
   const [tip, setTip] = useState<Tip | null>(null);
   const tipFor = (text: string) => ({
@@ -362,6 +410,7 @@ export function Rail(p: RailProps) {
                       waiting,
                     );
                     const doneOpen = showDone[c.key] || finished.some((f) => f.key === p.activeKey);
+                    const recent = recentFinished(finished, !!showAllDone[c.key], p.activeKey);
                     const dot = (t: Session, done: boolean) => (
                       <button
                         key={t.key}
@@ -401,7 +450,25 @@ export function Rail(p: RailProps) {
                             {doneOpen ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
                           </button>
                         )}
-                        {doneOpen && finished.map((t) => dot(t, true))}
+                        {doneOpen && recent.shown.map((t) => dot(t, true))}
+                        {doneOpen && finished.length > RECENT_DONE_LIMIT && (
+                          <button
+                            className="rail-task rail-done-toggle"
+                            aria-expanded={recent.expanded}
+                            onClick={() => {
+                              if (recent.expanded) {
+                                // Folding away an older task being viewed goes back to its lead.
+                                if (recent.activeOlder) p.onActivate(c.key);
+                                setShowAllDone((o) => ({ ...o, [c.key]: false }));
+                              } else {
+                                setShowAllDone((o) => ({ ...o, [c.key]: true }));
+                              }
+                            }}
+                            {...tipFor(recent.expanded ? "이전 작업 접기" : `이전 작업 ${recent.hidden}개 더 보기`)}
+                          >
+                            <MoreHorizontal size={13} />
+                          </button>
+                        )}
                       </Fragment>
                     );
                   })}

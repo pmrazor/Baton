@@ -1,0 +1,30 @@
+{
+  "id": "lang-lua",
+  "name": "Lua",
+  "version": "1.0.0",
+  "description": "Lua syntax highlighting",
+  "publisher": "baton",
+  "contributes": {
+    "languages": [
+      {
+        "id": "lua",
+        "name": "Lua",
+        "extensions": [
+          ".lua"
+        ],
+        "comments": {
+          "line": "--",
+          "block": [
+            "--[[",
+            "]]"
+          ]
+        },
+        "grammar": {
+          "legacyMode": {
+            "mode": "lua"
+          }
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "id": "lang-shell",
+  "name": "Shell",
+  "version": "1.0.0",
+  "description": "Shell syntax highlighting",
+  "publisher": "baton",
+  "contributes": {
+    "languages": [
+      {
+        "id": "shell",
+        "name": "Shell",
+        "extensions": [
+          ".sh",
+          ".bash",
+          ".zsh"
+        ],
+        "filenames": [
+          ".bashrc",
+          ".zshrc"
+        ],
+        "comments": {
+          "line": "#"
+        },
+        "grammar": {
+          "legacyMode": {
+            "mode": "shell"
+          }
+        }
+      }
+    ]
+  }
+}

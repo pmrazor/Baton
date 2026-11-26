@@ -187,6 +187,12 @@ button {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  scrollbar-width: none;
+}
+/* Higher specificity than the scrollbars.css rules, which load later. */
+:root:not([data-platform="mac"]) .workspace-tree::-webkit-scrollbar,
+.workspace-tree::-webkit-scrollbar {
+  display: none;
 }
 .empty-hint {
   width: 100%;
@@ -417,6 +423,12 @@ button {
   gap: 6px;
   min-height: 0;
   overflow-y: auto;
+  scrollbar-width: none;
+}
+/* Higher specificity than the scrollbars.css rules, which load later. */
+:root:not([data-platform="mac"]) .rail-workspaces::-webkit-scrollbar,
+.rail-workspaces::-webkit-scrollbar {
+  display: none;
 }
 .rail-ws {
   position: relative;
@@ -3100,4 +3112,82 @@ body {
 .notify-list li.disabled label,
 .notify-list li.disabled input {
   cursor: default;
+}
+
+/* Settings → 확장 */
+.ext-panel .ext-url-form {
+  margin-top: 8px;
+}
+.ext-field-label {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.ext-search {
+  position: relative;
+  display: flex;
+  align-items: center;
+  margin-top: 10px;
+}
+.ext-search-icon {
+  position: absolute;
+  left: 10px;
+  color: var(--muted);
+  pointer-events: none;
+}
+.ext-search input {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 10px 6px 30px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--text);
+  outline: none;
+}
+.ext-search input:focus {
+  border-color: var(--accent);
+}
+.ext-title-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+}
+.ext-name {
+  font-weight: 550;
+}
+.ext-version {
+  font-family: var(--mono);
+}
+.ext-list li.ext-disabled .grow {
+  opacity: 0.6;
+}
+.ext-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 6px;
+  color: var(--text-2);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ext-toggle input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.ext-installed-badge {
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: var(--muted);
+  white-space: nowrap;
+}
+.ext-delete-btn:hover {
+  border-color: var(--danger);
+  color: var(--danger);
 }

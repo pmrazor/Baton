@@ -319,13 +319,16 @@ describe("formatTokens and formatTaskUsage", () => {
     expect(formatTaskUsage(null)).toBeNull();
 
     expect(formatTaskUsage({ inputTokens: 120_345, outputTokens: 8_120, cachedReadTokens: 0 })).toEqual({
-      label: "토큰 입력 120k · 출력 8.1k",
-      title: "토큰 입력 120,345 · 출력 8,120",
+      label: "토큰 읽음 120k · 출력 8.1k",
+      title: "새로 읽음 120,345 · 출력 8,120",
     });
 
-    expect(formatTaskUsage({ inputTokens: 120_000, outputTokens: 8_000, cachedReadTokens: 95_000 })).toEqual({
-      label: "토큰 입력 120k · 출력 8k · 캐시 95k",
-      title: "토큰 입력 120,000 · 출력 8,000 · 캐시 95,000",
+    // Claude-style: nearly everything read comes from the cache.
+    expect(
+      formatTaskUsage({ inputTokens: 18, outputTokens: 18_000, cachedReadTokens: 345_000, cachedWriteTokens: 20_000 }),
+    ).toEqual({
+      label: "토큰 읽음 365k (캐시 95%) · 출력 18k",
+      title: "새로 읽음 18 · 캐시에서 읽음 345,000 · 캐시에 저장 20,000 · 출력 18,000",
     });
   });
 });

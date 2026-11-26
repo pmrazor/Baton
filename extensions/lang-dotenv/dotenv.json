@@ -1,0 +1,44 @@
+{
+  "languageData": {
+    "commentTokens": {
+      "line": "#"
+    }
+  },
+  "states": {
+    "start": [
+      {
+        "regex": "#.*$",
+        "token": "comment"
+      },
+      {
+        "regex": "([ \\t]*)([A-Za-z_][A-Za-z0-9_.]*)([ \\t]*)(=)",
+        "token": [null, "variableName", null, "operator"],
+        "sol": true
+      },
+      {
+        "regex": "\\$\\{[A-Za-z_][A-Za-z0-9_]*\\}",
+        "token": "variableName"
+      },
+      {
+        "regex": "\\$[A-Za-z_][A-Za-z0-9_]*",
+        "token": "variableName"
+      },
+      {
+        "regex": "\"(?:[^\"\\\\]|\\\\.)*\"",
+        "token": "string"
+      },
+      {
+        "regex": "'(?:[^'\\\\]|\\\\.)*'",
+        "token": "string"
+      },
+      {
+        "regex": "[^\\s#\"']+",
+        "token": "string"
+      },
+      {
+        "regex": "\\s+",
+        "token": null
+      }
+    ]
+  }
+}

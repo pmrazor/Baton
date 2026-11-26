@@ -34,6 +34,8 @@ import ImportModal, { type Imported } from "./components/ImportModal";
 import UpdateBanner from "./components/UpdateBanner";
 import WindowControls from "./components/WindowControls";
 import { findUpdate } from "./update";
+import "./extensions/languages";
+import { loadInstalledExtensions } from "./extensions/registry";
 import { onOpenRequest } from "./codeNav";
 import type { Update } from "@tauri-apps/plugin-updater";
 import { quotasFromUsageReport } from "./usage";
@@ -211,6 +213,7 @@ export default function App() {
     api.listAgents().then((agents) => dispatch({ type: "agents", agents }));
     api.listProfiles().then((profiles) => dispatch({ type: "profiles", profiles }));
     api.listTeams().then((teams) => dispatch({ type: "teams", teams }));
+    loadInstalledExtensions().catch((e) => console.warn("확장을 불러오지 못했어요:", e));
 
     api
       .loadSessions(init().workspaces)

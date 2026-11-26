@@ -1,0 +1,30 @@
+{
+  "id": "lang-dockerfile",
+  "name": "Dockerfile",
+  "version": "1.0.0",
+  "description": "Dockerfile syntax highlighting",
+  "publisher": "baton",
+  "contributes": {
+    "languages": [
+      {
+        "id": "dockerfile",
+        "name": "Dockerfile",
+        "filenames": [
+          "Dockerfile"
+        ],
+        "extensions": [
+          ".dockerfile"
+        ],
+        "comments": {
+          "line": "#"
+        },
+        "grammar": {
+          "legacyMode": {
+            "mode": "dockerfile",
+            "export": "dockerFile"
+          }
+        }
+      }
+    ]
+  }
+}

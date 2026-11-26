@@ -1,0 +1,31 @@
+{
+  "id": "lang-csharp",
+  "name": "C#",
+  "version": "1.0.0",
+  "description": "C# syntax highlighting",
+  "publisher": "baton",
+  "contributes": {
+    "languages": [
+      {
+        "id": "csharp",
+        "name": "C#",
+        "extensions": [
+          ".cs"
+        ],
+        "comments": {
+          "line": "//",
+          "block": [
+            "/*",
+            "*/"
+          ]
+        },
+        "grammar": {
+          "legacyMode": {
+            "mode": "clike",
+            "export": "csharp"
+          }
+        }
+      }
+    ]
+  }
+}

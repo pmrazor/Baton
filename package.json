@@ -1,7 +1,7 @@
 {
   "name": "baton",
   "private": true,
-  "version": "0.2.5",
+  "version": "0.2.6",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -9,6 +9,7 @@
     "typecheck": "tsc --noEmit",
     "tauri": "tauri",
     "licenses": "node scripts/gen-licenses.mjs",
+    "extensions:index": "node scripts/build-extension-index.mjs",
     "test": "vitest run"
   },
   "dependencies": {

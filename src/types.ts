@@ -285,9 +285,11 @@ export type TaskStatus = "queued" | "starting" | "waiting_lock" | "running" | "d
 
 /** Cumulative token usage across every turn a delegated task ran. */
 export interface TaskUsage {
+  /** Input not served from the prompt cache. */
   inputTokens: number;
   outputTokens: number;
   cachedReadTokens: number;
+  cachedWriteTokens?: number;
 }
 
 /** A task a lead delegated (mirrors the backend's TaskInfo). */

@@ -1,6 +1,7 @@
 pub mod acp;
 pub mod agents;
 mod attachments;
+mod extensions;
 mod files;
 mod git;
 mod gitblame;
@@ -583,6 +584,12 @@ pub fn run() {
             terminal::terminal_close,
             terminal::terminal_list,
             files::fs_list,
+            extensions::ext_fetch_registry,
+            extensions::ext_install,
+            extensions::ext_uninstall,
+            extensions::ext_set_enabled,
+            extensions::ext_list_installed,
+            extensions::ext_read_file,
             files::fs_read,
             files::fs_write,
             files::fs_stat,

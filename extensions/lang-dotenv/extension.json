@@ -1,0 +1,29 @@
+{
+  "id": "lang-dotenv",
+  "name": "Dotenv",
+  "version": "1.0.0",
+  "description": "Dotenv (.env) syntax highlighting",
+  "publisher": "baton",
+  "contributes": {
+    "languages": [
+      {
+        "id": "dotenv",
+        "name": "Dotenv",
+        "extensions": [
+          ".env"
+        ],
+        "filenames": [
+          ".env",
+          ".env.local",
+          ".env.example"
+        ],
+        "comments": {
+          "line": "#"
+        },
+        "grammar": {
+          "simpleMode": "dotenv.json"
+        }
+      }
+    ]
+  }
+}

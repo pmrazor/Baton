@@ -40,12 +40,18 @@ export function formatTokens(n: number): string {
 /** Compact token line and exact-number tooltip for a TaskCard row; null when unreported. */
 export function formatTaskUsage(usage: TaskUsage | null | undefined): { label: string; title: string } | null {
   if (!usage) return null;
-  const cachedLabel = usage.cachedReadTokens > 0 ? ` · 캐시 ${formatTokens(usage.cachedReadTokens)}` : "";
-  const cachedTitle =
-    usage.cachedReadTokens > 0 ? ` · 캐시 ${usage.cachedReadTokens.toLocaleString("ko-KR")}` : "";
+  const written = usage.cachedWriteTokens ?? 0;
+  // Claude reports most of what it reads as cache hits, so "read" counts them too.
+  const read = usage.inputTokens + usage.cachedReadTokens + written;
+  const share = read > 0 && usage.cachedReadTokens > 0 ? ` (캐시 ${Math.round((usage.cachedReadTokens / read) * 100)}%)` : "";
+  const n = (v: number) => v.toLocaleString("ko-KR");
+  const parts = [`새로 읽음 ${n(usage.inputTokens)}`];
+  if (usage.cachedReadTokens > 0) parts.push(`캐시에서 읽음 ${n(usage.cachedReadTokens)}`);
+  if (written > 0) parts.push(`캐시에 저장 ${n(written)}`);
+  parts.push(`출력 ${n(usage.outputTokens)}`);
   return {
-    label: `토큰 입력 ${formatTokens(usage.inputTokens)} · 출력 ${formatTokens(usage.outputTokens)}${cachedLabel}`,
-    title: `토큰 입력 ${usage.inputTokens.toLocaleString("ko-KR")} · 출력 ${usage.outputTokens.toLocaleString("ko-KR")}${cachedTitle}`,
+    label: `토큰 읽음 ${formatTokens(read)}${share} · 출력 ${formatTokens(usage.outputTokens)}`,
+    title: parts.join(" · "),
   };
 }
 

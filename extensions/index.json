@@ -1,0 +1,303 @@
+{
+  "version": 1,
+  "extensions": [
+    {
+      "id": "lang-c-cpp",
+      "name": "C/C++",
+      "version": "1.0.0",
+      "description": "C and C++ syntax highlighting",
+      "publisher": "baton",
+      "kinds": [
+        "languages"
+      ],
+      "keywords": [
+        "c",
+        ".c",
+        ".h",
+        "cpp",
+        ".cc",
+        ".cpp",
+        ".cxx",
+        ".hpp",
+        ".hh"
+      ],
+      "files": [
+        {
+          "path": "extension.json",
+          "sha256": "4cd36836b3ff0ca1150418558b396cb61576b92961a5f1b7078b69b34c1915c5",
+          "size": 994
+        }
+      ]
+    },
+    {
+      "id": "lang-csharp",
+      "name": "C#",
+      "version": "1.0.0",
+      "description": "C# syntax highlighting",
+      "publisher": "baton",
+      "kinds": [
+        "languages"
+      ],
+      "keywords": [
+        "csharp",
+        ".cs"
+      ],
+      "files": [
+        {
+          "path": "extension.json",
+          "sha256": "008e06a56611263b069ce37d6b1b7c108eee21416e576a98ff7fdab9b3a4c21d",
+          "size": 547
+        }
+      ]
+    },
+    {
+      "id": "lang-dockerfile",
+      "name": "Dockerfile",
+      "version": "1.0.0",
+      "description": "Dockerfile syntax highlighting",
+      "publisher": "baton",
+      "kinds": [
+        "languages"
+      ],
+      "keywords": [
+        "dockerfile",
+        ".dockerfile",
+        "Dockerfile"
+      ],
+      "files": [
+        {
+          "path": "extension.json",
+          "sha256": "ecc4a26fe02e36f6a93196afaca649d8d7a1074651e421ef7d809c8a09e67ab3",
+          "size": 583
+        }
+      ]
+    },
+    {
+      "id": "lang-dotenv",
+      "name": "Dotenv",
+      "version": "1.0.0",
+      "description": "Dotenv (.env) syntax highlighting",
+      "publisher": "baton",
+      "kinds": [
+        "languages"
+      ],
+      "keywords": [
+        "dotenv",
+        ".env",
+        ".env.local",
+        ".env.example"
+      ],
+      "files": [
+        {
+          "path": "extension.json",
+          "sha256": "d3d2dca3354f472d4428f9f3cd35573606b3237cebce8b427af390f56754bd3c",
+          "size": 538
+        },
+        {
+          "path": "dotenv.json",
+          "sha256": "3d6bc8274c9505576351e248c8d4226f78805f6ed9684fc9cc462d2aaf889dc6",
+          "size": 854
+        }
+      ]
+    },
+    {
+      "id": "lang-go",
+      "name": "Go",
+      "version": "1.0.0",
+      "description": "Go syntax highlighting",
+      "publisher": "baton",
+      "kinds": [
+        "languages"
+      ],
+      "keywords": [
+        "go",
+        ".go"
+      ],
+      "files": [
+        {
+          "path": "extension.json",
+          "sha256": "3f0d741349e4ce1dc5339be149d8a23e3bf7d69effd8791d846a67cbc498914f",
+          "size": 504
+        }
+      ]
+    },
+    {
+      "id": "lang-java",
+      "name": "Java",
+      "version": "1.0.0",
+      "description": "Java syntax highlighting",
+      "publisher": "baton",
+      "kinds": [
+        "languages"
+      ],
+      "keywords": [
+        "java",
+        ".java"
+      ],
+      "files": [
+        {
+          "path": "extension.json",
+          "sha256": "9eb101eb2abc69efdc6612bab8b699e965ebf78ab82423c7efeee91c98c548fc",
+          "size": 549
+        }
+      ]
+    },
+    {
+      "id": "lang-kotlin",
+      "name": "Kotlin",
+      "version": "1.0.0",
+      "description": "Kotlin syntax highlighting",
+      "publisher": "baton",
+      "kinds": [
+        "languages"
+      ],
+      "keywords": [
+        "kotlin",
+        ".kt",
+        ".kts"
+      ],
+      "files": [
+        {
+          "path": "extension.json",
+          "sha256": "d1eb7eb96272c4e4e9818d66742064468718257a4db7ad8ec422a5279a9ade16",
+          "size": 577
+        }
+      ]
+    },
+    {
+      "id": "lang-lua",
+      "name": "Lua",
+      "version": "1.0.0",
+      "description": "Lua syntax highlighting",
+      "publisher": "baton",
+      "kinds": [
+        "languages"
+      ],
+      "keywords": [
+        "lua",
+        ".lua"
+      ],
+      "files": [
+        {
+          "path": "extension.json",
+          "sha256": "0d64d57243420d561452df4685d2d02fb0bdfa26a7800e27c31de93f2115af27",
+          "size": 513
+        }
+      ]
+    },
+    {
+      "id": "lang-powershell",
+      "name": "PowerShell",
+      "version": "1.0.0",
+      "description": "PowerShell syntax highlighting",
+      "publisher": "baton",
+      "kinds": [
+        "languages"
+      ],
+      "keywords": [
+        "powershell",
+        ".ps1",
+        ".psm1"
+      ],
+      "files": [
+        {
+          "path": "extension.json",
+          "sha256": "593a2cb4c00f815e46fbffef8b71c6d19d1e4e55ecd217e09ca36709ffc0310b",
+          "size": 607
+        }
+      ]
+    },
+    {
+      "id": "lang-ruby",
+      "name": "Ruby",
+      "version": "1.0.0",
+      "description": "Ruby syntax highlighting",
+      "publisher": "baton",
+      "kinds": [
+        "languages"
+      ],
+      "keywords": [
+        "ruby",
+        ".rb",
+        ".rake",
+        ".gemspec",
+        "Gemfile",
+        "Rakefile"
+      ],
+      "files": [
+        {
+          "path": "extension.json",
+          "sha256": "e6ece417878da346f9d91119f194b6836946b33b05984fc0eba1ffe0e9852aca",
+          "size": 638
+        }
+      ]
+    },
+    {
+      "id": "lang-shell",
+      "name": "Shell",
+      "version": "1.0.0",
+      "description": "Shell syntax highlighting",
+      "publisher": "baton",
+      "kinds": [
+        "languages"
+      ],
+      "keywords": [
+        "shell",
+        ".sh",
+        ".bash",
+        ".zsh",
+        ".bashrc",
+        ".zshrc"
+      ],
+      "files": [
+        {
+          "path": "extension.json",
+          "sha256": "6dd0c72f179e9ddd31f47a730fc6213b1312e8ef8f1d74f7778e25dae622ec84",
+          "size": 563
+        }
+      ]
+    },
+    {
+      "id": "lang-sql",
+      "name": "SQL",
+      "version": "1.0.0",
+      "description": "SQL syntax highlighting",
+      "publisher": "baton",
+      "kinds": [
+        "languages"
+      ],
+      "keywords": [
+        "sql",
+        ".sql"
+      ],
+      "files": [
+        {
+          "path": "extension.json",
+          "sha256": "33f37a683d4c1a9bc982315c00d1abe2ee3dbea027630ab122162ad82fa64419",
+          "size": 548
+        }
+      ]
+    },
+    {
+      "id": "lang-swift",
+      "name": "Swift",
+      "version": "1.0.0",
+      "description": "Swift syntax highlighting",
+      "publisher": "baton",
+      "kinds": [
+        "languages"
+      ],
+      "keywords": [
+        "swift",
+        ".swift"
+      ],
+      "files": [
+        {
+          "path": "extension.json",
+          "sha256": "55513e61b5f1d5b5b144b97279941135d1cc74a693f2491b20b64eecfd19a57c",
+          "size": 525
+        }
+      ]
+    }
+  ]
+}

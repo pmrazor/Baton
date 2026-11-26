@@ -1,0 +1,30 @@
+{
+  "id": "lang-go",
+  "name": "Go",
+  "version": "1.0.0",
+  "description": "Go syntax highlighting",
+  "publisher": "baton",
+  "contributes": {
+    "languages": [
+      {
+        "id": "go",
+        "name": "Go",
+        "extensions": [
+          ".go"
+        ],
+        "comments": {
+          "line": "//",
+          "block": [
+            "/*",
+            "*/"
+          ]
+        },
+        "grammar": {
+          "legacyMode": {
+            "mode": "go"
+          }
+        }
+      }
+    ]
+  }
+}
