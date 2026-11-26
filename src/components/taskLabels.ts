@@ -1,6 +1,6 @@
 import { createContext } from "react";
 import { isLimitError } from "../handoff";
-import { isTaskActive, type Session, type TaskInfo, type TaskStatus, type Team } from "../types";
+import { isTaskActive, type Session, type TaskInfo, type TaskStatus, type TaskUsage, type Team } from "../types";
 
 /** Provides the current teams list to nested task views without threading extra props through ChatView. */
 export const TeamsContext = createContext<Team[]>([]);
@@ -18,6 +18,36 @@ export const TASK_STATUS: Record<TaskStatus, { label: string; tone: string }> = 
 export const LIMIT_FAILED_LABEL = "한도 때문에 중단됨";
 export const DISCARDED_EMPTY_LABEL = "변경 없이 정리됨";
 export const DISCARDED_CHANGES_LABEL = "변경을 버렸어요";
+
+/** Format a token count compactly: `<1000` as is, then `"1.2k"`, `"120k"`, `"1.3M"`. */
+export function formatTokens(n: number): string {
+  const v = Math.max(0, Math.round(n));
+  if (v < 1000) return String(v);
+  if (v < 999_500) {
+    if (v < 9_950) {
+      const tenths = Math.round(v / 100);
+      return tenths % 10 === 0 ? `${tenths / 10}k` : `${(tenths / 10).toFixed(1)}k`;
+    }
+    return `${Math.round(v / 1000)}k`;
+  }
+  if (v < 9_950_000) {
+    const tenths = Math.round(v / 100_000);
+    return tenths % 10 === 0 ? `${tenths / 10}M` : `${(tenths / 10).toFixed(1)}M`;
+  }
+  return `${Math.round(v / 1_000_000)}M`;
+}
+
+/** Compact token line and exact-number tooltip for a TaskCard row; null when unreported. */
+export function formatTaskUsage(usage: TaskUsage | null | undefined): { label: string; title: string } | null {
+  if (!usage) return null;
+  const cachedLabel = usage.cachedReadTokens > 0 ? ` · 캐시 ${formatTokens(usage.cachedReadTokens)}` : "";
+  const cachedTitle =
+    usage.cachedReadTokens > 0 ? ` · 캐시 ${usage.cachedReadTokens.toLocaleString("ko-KR")}` : "";
+  return {
+    label: `토큰 입력 ${formatTokens(usage.inputTokens)} · 출력 ${formatTokens(usage.outputTokens)}${cachedLabel}`,
+    title: `토큰 입력 ${usage.inputTokens.toLocaleString("ko-KR")} · 출력 ${usage.outputTokens.toLocaleString("ko-KR")}${cachedTitle}`,
+  };
+}
 
 /** Whether a task ended in failure because of a usage / rate limit. */
 export function isLimitFailed(task: TaskInfo): boolean {

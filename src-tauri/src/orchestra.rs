@@ -52,6 +52,7 @@ You can hand work to team members with the baton tools:
 - Call list_agents first: it shows the team, what each member is good at, and how much of its usage limit is left.
 - Split the request into self-contained tasks. Members cannot see this conversation, so each task message must carry
   everything needed: goal, relevant files, constraints, and what to report back.
+- When delegating, name the relevant files, functions, and exact checks to run so members don't have to explore.
 - Choose the member whose role fits. Prefer members with more usage left, and give simple work to cheaper members.
 - Members with \"available\": false hit their usage limit until limited_until; delegate to someone else meanwhile.
 - Set writes_files=false for read-only tasks (research, review, analysis); they run in parallel in the workspace.
@@ -78,6 +79,7 @@ The user turned on agent mode: split the work across your team instead of doing 
 2. Hand out the implementation work with baton delegate, choosing members by role and remaining usage. Read-only
    tasks run in parallel; file-writing tasks run one at a time.
 3. Use baton wait to collect results, review them (read the changed files), follow up or fix, then report back.
+When delegating, name the relevant files, functions, and exact checks to run so members don't have to explore.
 Tool results may carry user_messages the user typed meanwhile; follow them.
 Work alone only if the whole request is a quick question or a one-line change.
 ";
@@ -89,7 +91,10 @@ const USER_MESSAGES_NOTE: &str = "The user sent these messages while you were wo
 const ATTACHMENTS_NOTE: &str = "[Attached files — note from the app]";
 
 const SUBTASK_PREAMBLE: &str = "\
-[Baton] A lead agent assigned you the task below. Work in the current workspace. \
+[Baton] A lead agent assigned you the task below; work in the current workspace. \
+Start from the files and symbols the task names and read only what you need. \
+Use targeted search (rg / grep) instead of listing or reading whole directories. \
+If the repo has AGENTS.md or CLAUDE.md, rely on it for the project layout instead of re-exploring. \
 Finish with a short report: what you did, files you changed, and anything left undone or uncertain.";
 
 fn now_ms() -> u64 {
@@ -113,6 +118,14 @@ struct Lead {
     cwd: String,
     team_id: String,
     slots: Arc<Semaphore>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cached_read_tokens: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -146,6 +159,8 @@ pub struct TaskInfo {
     pub reassigned: Vec<String>,
     /// True when the task ended or was moved because of a usage limit.
     pub limit_hit: bool,
+    /// Cumulative token usage across every turn this task has run.
+    pub usage: Option<TaskUsage>,
 }
 
 struct Task {
@@ -624,6 +639,7 @@ impl Orchestra {
             merged: Vec::new(),
             reassigned: Vec::new(),
             limit_hit: false,
+            usage: None,
         };
         self.tasks.lock().unwrap().insert(
             id.clone(),
@@ -691,31 +707,7 @@ impl Orchestra {
     fn report(&self, id: &str) -> Value {
         let tasks = self.tasks.lock().unwrap();
         let Some(task) = tasks.get(id) else { return json!({ "task_id": id, "error": "unknown task" }) };
-        let elapsed = task.info.started_at.map(|s| (task.info.ended_at.unwrap_or_else(now_ms) - s) / 1000);
-        let mut result: String = task.result.chars().take(MAX_RESULT_CHARS).collect();
-        if task.result.chars().count() > MAX_RESULT_CHARS {
-            result.push_str("\n[…truncated]");
-        }
-        let mut out = json!({
-            "task_id": id,
-            "title": task.info.title,
-            "member": task.info.member_id,
-            "status": task.info.status,
-            "elapsed_seconds": elapsed,
-            "result": if Self::is_terminal(&task.info.status) { Value::String(result) } else { Value::Null },
-            "error": task.info.error,
-            "user_notes": task.notes,
-            "isolated": task.info.isolated,
-            "worktree_path": task.sandbox.as_ref().map(|s| s.path.display().to_string()),
-            "changed_files": task.info.changes,
-            "merged_files": task.info.merged,
-            "merge_state": task.info.merge_state,
-            "conflicts": task.info.conflicts,
-        });
-        if !task.info.reassigned.is_empty() {
-            out["reassigned"] = json!(task.info.reassigned.join("; "));
-        }
-        out
+        task_report(task, now_ms())
     }
 
     async fn wait(&self, args: &Value) -> Value {
@@ -871,6 +863,90 @@ impl Orchestra {
         }
         Ok(res)
     }
+}
+
+/// Sum token usage from one ACP `session/prompt` response into the task total.
+/// Leaves `acc` unchanged when the response carries no `usage` numbers.
+fn add_usage(acc: Option<TaskUsage>, response: &Value) -> Option<TaskUsage> {
+    let Some(usage) = response.get("usage").and_then(Value::as_object) else {
+        return acc;
+    };
+    let input = usage.get("inputTokens").and_then(Value::as_u64);
+    let output = usage.get("outputTokens").and_then(Value::as_u64);
+    let cached = usage.get("cachedReadTokens").and_then(Value::as_u64);
+    if input.is_none() && output.is_none() && cached.is_none() {
+        return acc;
+    }
+    let mut total = acc.unwrap_or_default();
+    total.input_tokens = total.input_tokens.saturating_add(input.unwrap_or(0));
+    total.output_tokens = total.output_tokens.saturating_add(output.unwrap_or(0));
+    total.cached_read_tokens = total.cached_read_tokens.saturating_add(cached.unwrap_or(0));
+    Some(total)
+}
+
+/// Compact token count: `<1000` as is, then `"1.2k"`, `"120k"`, `"1.3M"`.
+fn format_tokens(n: u64) -> String {
+    if n < 1_000 {
+        return n.to_string();
+    }
+    if n < 999_500 {
+        if n < 9_950 {
+            let tenths = (n + 50) / 100;
+            if tenths.is_multiple_of(10) {
+                return format!("{}k", tenths / 10);
+            }
+            return format!("{}.{}k", tenths / 10, tenths % 10);
+        }
+        return format!("{}k", (n + 500) / 1_000);
+    }
+    if n < 9_950_000 {
+        let tenths = (n + 50_000) / 100_000;
+        if tenths.is_multiple_of(10) {
+            return format!("{}M", tenths / 10);
+        }
+        return format!("{}.{}M", tenths / 10, tenths % 10);
+    }
+    format!("{}M", n.saturating_add(500_000) / 1_000_000)
+}
+
+/// Compact one-line token summary for the lead's MCP task report.
+fn format_tokens_report(u: TaskUsage) -> String {
+    let mut out = format!("in {} · out {}", format_tokens(u.input_tokens), format_tokens(u.output_tokens));
+    if u.cached_read_tokens > 0 {
+        out.push_str(&format!(" · cached {}", format_tokens(u.cached_read_tokens)));
+    }
+    out
+}
+
+fn task_report(task: &Task, now: u64) -> Value {
+    let elapsed = task.info.started_at.map(|s| task.info.ended_at.unwrap_or(now).saturating_sub(s) / 1000);
+    let mut result: String = task.result.chars().take(MAX_RESULT_CHARS).collect();
+    if task.result.chars().count() > MAX_RESULT_CHARS {
+        result.push_str("\n[…truncated]");
+    }
+    let mut out = json!({
+        "task_id": task.info.id,
+        "title": task.info.title,
+        "member": task.info.member_id,
+        "status": task.info.status,
+        "elapsed_seconds": elapsed,
+        "result": if Orchestra::is_terminal(&task.info.status) { Value::String(result) } else { Value::Null },
+        "error": task.info.error,
+        "user_notes": task.notes,
+        "isolated": task.info.isolated,
+        "worktree_path": task.sandbox.as_ref().map(|s| s.path.display().to_string()),
+        "changed_files": task.info.changes,
+        "merged_files": task.info.merged,
+        "merge_state": task.info.merge_state,
+        "conflicts": task.info.conflicts,
+    });
+    if !task.info.reassigned.is_empty() {
+        out["reassigned"] = json!(task.info.reassigned.join("; "));
+    }
+    if let Some(usage) = task.info.usage {
+        out["tokens"] = json!(format_tokens_report(usage));
+    }
+    out
 }
 
 /// Attach mid-turn queued user messages to a Baton MCP tool result.
@@ -1094,8 +1170,16 @@ async fn run_turn(app: AppHandle, token: String, task_id: String, message: Strin
         // Absolute paths, so they still resolve from a worktree task's copy of the workspace.
         let mut outcome = hub.prompt(&member.agent_id, &session_id, &prompt, &attachments).await.map_err(|e| e.message);
         // Some agents (Antigravity) report a used-up quota as an ordinary reply.
-        if outcome.is_ok() {
-            let answer = orch.tasks.lock().unwrap().get(&task_id).map(|t| t.answer.clone()).unwrap_or_default();
+        if let Ok(res) = &outcome {
+            let answer = {
+                let mut tasks = orch.tasks.lock().unwrap();
+                if let Some(t) = tasks.get_mut(&task_id) {
+                    t.info.usage = add_usage(t.info.usage, res);
+                    t.answer.clone()
+                } else {
+                    String::new()
+                }
+            };
             if is_limit_notice(&answer) {
                 outcome = Err(answer.trim().to_string());
             }
@@ -1977,6 +2061,7 @@ mod tests {
                 merged: Vec::new(),
                 reassigned: Vec::new(),
                 limit_hit: false,
+                usage: None,
             },
             member,
             cwd: "/work".into(),
@@ -2221,6 +2306,11 @@ mod tests {
             merged: Vec::new(),
             reassigned: vec!["claude-opus-5-5 → antigravity-claude-opus-5-5 (usage limit)".into()],
             limit_hit: true,
+            usage: Some(TaskUsage {
+                input_tokens: 120_000,
+                output_tokens: 8_000,
+                cached_read_tokens: 95_000,
+            }),
         };
         let serialized = serde_json::to_value(&info).unwrap();
         assert_eq!(
@@ -2228,6 +2318,82 @@ mod tests {
             json!(["claude-opus-5-5 → antigravity-claude-opus-5-5 (usage limit)"])
         );
         assert_eq!(serialized["limitHit"], json!(true));
+        assert_eq!(
+            serialized["usage"],
+            json!({ "inputTokens": 120_000, "outputTokens": 8_000, "cachedReadTokens": 95_000 })
+        );
+    }
+
+    #[test]
+    fn add_usage_accumulates_and_handles_missing_fields() {
+        // No usage reported -> stays None.
+        assert_eq!(add_usage(None, &json!({ "stopReason": "end_turn" })), None);
+        assert_eq!(add_usage(None, &json!({ "stopReason": "end_turn", "usage": null })), None);
+        assert_eq!(add_usage(None, &json!({ "stopReason": "end_turn", "usage": {} })), None);
+
+        // Missing individual fields default to 0.
+        let first = add_usage(
+            None,
+            &json!({ "stopReason": "end_turn", "usage": { "inputTokens": 40_000, "outputTokens": 2_500 } }),
+        );
+        assert_eq!(
+            first,
+            Some(TaskUsage { input_tokens: 40_000, output_tokens: 2_500, cached_read_tokens: 0 })
+        );
+
+        // Follow-up or reassigned member's turn sums into the running total.
+        let second = add_usage(
+            first,
+            &json!({ "stopReason": "end_turn", "usage": { "inputTokens": 80_000, "outputTokens": 5_500, "cachedReadTokens": 95_000 } }),
+        );
+        assert_eq!(
+            second,
+            Some(TaskUsage { input_tokens: 120_000, output_tokens: 8_000, cached_read_tokens: 95_000 })
+        );
+
+        // A later turn that omits usage preserves the accumulated total.
+        assert_eq!(add_usage(second, &json!({ "stopReason": "end_turn" })), second);
+        assert_eq!(add_usage(second, &json!({ "stopReason": "end_turn", "usage": {} })), second);
+    }
+
+    #[test]
+    fn task_report_formats_compact_tokens_field() {
+        assert_eq!(format_tokens(0), "0");
+        assert_eq!(format_tokens(999), "999");
+        assert_eq!(format_tokens(1_000), "1k");
+        assert_eq!(format_tokens(1_200), "1.2k");
+        assert_eq!(format_tokens(8_000), "8k");
+        assert_eq!(format_tokens(120_000), "120k");
+        assert_eq!(format_tokens(1_300_000), "1.3M");
+
+        let mut task = test_task("t1", "claude", "lead");
+        task.info.status = "done".into();
+        let without = task_report(&task, 5000);
+        assert!(without.get("tokens").is_none());
+
+        task.info.usage = Some(TaskUsage { input_tokens: 120_000, output_tokens: 8_000, cached_read_tokens: 95_000 });
+        let with_cached = task_report(&task, 5000);
+        assert_eq!(with_cached["tokens"], json!("in 120k · out 8k · cached 95k"));
+
+        task.info.usage = Some(TaskUsage { input_tokens: 850, output_tokens: 42, cached_read_tokens: 0 });
+        let without_cached = task_report(&task, 5000);
+        assert_eq!(without_cached["tokens"], json!("in 850 · out 42"));
+    }
+
+    #[test]
+    fn prompt_constants_guide_targeted_work_and_keep_existing_rules() {
+        assert!(SUBTASK_PREAMBLE.starts_with("[Baton] A lead agent"));
+        assert!(SUBTASK_PREAMBLE.contains("rg / grep"));
+        assert!(SUBTASK_PREAMBLE.contains("AGENTS.md"));
+        assert!(SUBTASK_PREAMBLE.contains("CLAUDE.md"));
+        assert!(SUBTASK_PREAMBLE.contains("Finish with a short report"));
+
+        assert!(INSTRUCTIONS.contains("user_messages"));
+        assert!(INSTRUCTIONS.contains("name the relevant files, functions, and exact checks"));
+
+        assert!(LEAD_PREAMBLE.starts_with("[Baton agent mode"));
+        assert!(LEAD_PREAMBLE.contains("user_messages"));
+        assert!(LEAD_PREAMBLE.contains("name the relevant files, functions, and exact checks"));
     }
 
     #[test]

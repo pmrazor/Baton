@@ -3,6 +3,8 @@ import type { Session, TaskInfo, Team } from "../types";
 import {
   canReviewChanges,
   formatReassigned,
+  formatTaskUsage,
+  formatTokens,
   isLimitFailed,
   memberNameMap,
   mergeLine,
@@ -293,5 +295,37 @@ describe("sidebar taskTone and taskLabel", () => {
     expect(taskLabel(leadLimitDiscarded, child, emptyWait, sampleTeams)).toBe(
       "README 갱신 · 한도 때문에 중단됨 · 변경 없이 정리됨",
     );
+  });
+});
+
+describe("formatTokens and formatTaskUsage", () => {
+  it("formats token counts compactly", () => {
+    expect(formatTokens(0)).toBe("0");
+    expect(formatTokens(42)).toBe("42");
+    expect(formatTokens(999)).toBe("999");
+    expect(formatTokens(1_000)).toBe("1k");
+    expect(formatTokens(1_200)).toBe("1.2k");
+    expect(formatTokens(8_000)).toBe("8k");
+    expect(formatTokens(9_949)).toBe("9.9k");
+    expect(formatTokens(9_950)).toBe("10k");
+    expect(formatTokens(120_000)).toBe("120k");
+    expect(formatTokens(999_500)).toBe("1M");
+    expect(formatTokens(1_300_000)).toBe("1.3M");
+    expect(formatTokens(12_000_000)).toBe("12M");
+  });
+
+  it("formats task usage label and exact tooltip", () => {
+    expect(formatTaskUsage(undefined)).toBeNull();
+    expect(formatTaskUsage(null)).toBeNull();
+
+    expect(formatTaskUsage({ inputTokens: 120_345, outputTokens: 8_120, cachedReadTokens: 0 })).toEqual({
+      label: "토큰 입력 120k · 출력 8.1k",
+      title: "토큰 입력 120,345 · 출력 8,120",
+    });
+
+    expect(formatTaskUsage({ inputTokens: 120_000, outputTokens: 8_000, cachedReadTokens: 95_000 })).toEqual({
+      label: "토큰 입력 120k · 출력 8k · 캐시 95k",
+      title: "토큰 입력 120,000 · 출력 8,000 · 캐시 95,000",
+    });
   });
 });

@@ -7,6 +7,7 @@ import { commitFileLetter, LETTER_TITLE, letterTone } from "./git/gitHelpers";
 import {
   canReviewChanges,
   formatReassigned,
+  formatTaskUsage,
   memberNameMap,
   taskStatusBadge,
   taskSubLine,
@@ -76,6 +77,7 @@ export default function TaskCard({
           t.startedAt && (t.status === "running" || t.endedAt) ? ` · ${clock((t.endedAt ?? now) - t.startedAt)}` : "";
         const sub = taskSubLine(t, leadBusy);
         const reassignedLine = formatReassigned(t.reassigned, memberNames);
+        const usageLine = formatTaskUsage(t.usage);
         return (
           <div key={t.id} className="task-block">
             <button className="task" disabled={!key} onClick={() => key && onOpen(key)}>
@@ -88,6 +90,11 @@ export default function TaskCard({
                 {reassignedLine && (
                   <span className="task-sub task-reassigned" title={reassignedLine}>
                     {reassignedLine}
+                  </span>
+                )}
+                {usageLine && (
+                  <span className="task-sub task-usage" title={usageLine.title}>
+                    {usageLine.label}
                   </span>
                 )}
               </span>

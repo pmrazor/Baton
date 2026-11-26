@@ -2079,6 +2079,10 @@ button {
 .task-reassigned {
   color: var(--warn);
 }
+.task-usage {
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
 .task-status {
   display: inline-flex;
   align-items: center;

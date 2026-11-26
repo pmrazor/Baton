@@ -283,6 +283,13 @@ export interface AccountUsage {
 
 export type TaskStatus = "queued" | "starting" | "waiting_lock" | "running" | "done" | "failed" | "cancelled";
 
+/** Cumulative token usage across every turn a delegated task ran. */
+export interface TaskUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cachedReadTokens: number;
+}
+
 /** A task a lead delegated (mirrors the backend's TaskInfo). */
 export interface TaskInfo {
   id: string;
@@ -310,6 +317,8 @@ export interface TaskInfo {
   reassigned: string[];
   /** True when the task ended or was moved because of a usage limit. */
   limitHit: boolean;
+  /** Cumulative token usage across all turns the task ran; absent when unreported. */
+  usage?: TaskUsage | null;
   /** The lead's user message (turn) this task was created in. */
   turnId?: string;
 }
