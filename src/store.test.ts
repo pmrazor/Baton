@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { initialState, reducer, type Action, type State } from "./store";
+import { DELIVERED_TAG, initialState, reducer, type Action, type State } from "./store";
 import { attachmentOf, usableTeams, type AgentInfo, type ChatItem, type Session, type TaskInfo, type Team } from "./types";
 
 const run = (state: State, ...actions: Action[]) => actions.reduce(reducer, state);
@@ -397,5 +397,74 @@ describe("workspaces", () => {
     );
     expect(state.workspace).toBe("/here");
     expect(state.missing).toEqual(["/gone"]);
+  });
+});
+
+describe("queued messages and mid-turn inbox delivery", () => {
+  it("appends and removes queued messages by id", () => {
+    const file = attachmentOf("/work/spec.md");
+    let state = run(
+      initialState,
+      created("s1"),
+      { type: "queueMessage", key: "claude:s1", id: "q1", text: "first", attachments: [] },
+      { type: "queueMessage", key: "claude:s1", id: "q2", text: "second", attachments: [file] },
+    );
+    expect(session(state, "s1").queued).toEqual([
+      { id: "q1", text: "first", attachments: [] },
+      { id: "q2", text: "second", attachments: [file] },
+    ]);
+
+    state = run(state, { type: "unqueueMessage", key: "claude:s1", id: "q1" });
+    expect(session(state, "s1").queued).toEqual([{ id: "q2", text: "second", attachments: [file] }]);
+
+    state = run(state, { type: "unqueueMessage", key: "claude:s1", id: "missing" });
+    expect(session(state, "s1").queued).toEqual([{ id: "q2", text: "second", attachments: [file] }]);
+  });
+
+  it("moves delivered items out of queued and appends them as labeled chat items", () => {
+    const shot = attachmentOf("/work/shot.png");
+    let state = run(
+      initialState,
+      created("lead", { lead: { teamId: "auto" } }),
+      { type: "userMessage", key: "claude:lead", text: "initial task" },
+      { type: "queueMessage", key: "claude:lead", id: "q1", text: "use dark mode", attachments: [shot] },
+      { type: "queueMessage", key: "claude:lead", id: "q2", text: "keep tests green", attachments: [] },
+      { type: "queueMessage", key: "claude:lead", id: "q3", text: "typed after drain", attachments: [] },
+    );
+
+    state = run(state, {
+      type: "inboxDelivered",
+      key: "claude:lead",
+      items: [
+        { id: "q1", text: "use dark mode", attachments: ["/work/shot.png"] },
+        { id: "q2", text: "keep tests green", attachments: [] },
+      ],
+    });
+
+    const s = session(state, "lead");
+    expect(s.queued).toEqual([{ id: "q3", text: "typed after drain", attachments: [] }]);
+    expect(s.items).toHaveLength(3);
+    expect(s.items[1]).toMatchObject({
+      kind: "user",
+      tag: DELIVERED_TAG,
+      text: "use dark mode",
+      attachments: [shot],
+    });
+    expect(s.items[2]).toMatchObject({
+      kind: "user",
+      tag: DELIVERED_TAG,
+      text: "keep tests green",
+    });
+    expect(s.items[2]).not.toHaveProperty("attachments");
+  });
+
+  it("ignores empty inboxDelivered events", () => {
+    const base = run(
+      initialState,
+      created("s1"),
+      { type: "queueMessage", key: "claude:s1", id: "q1", text: "wait", attachments: [] },
+    );
+    const next = run(base, { type: "inboxDelivered", key: "claude:s1", items: [] });
+    expect(next).toBe(base);
   });
 });

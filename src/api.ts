@@ -41,6 +41,12 @@ export interface NewSessionResult {
   modes?: SessionModes | null;
 }
 
+export interface InboxItem {
+  id: string;
+  text: string;
+  attachments: string[];
+}
+
 export interface FsEntry {
   name: string;
   path: string;
@@ -188,6 +194,11 @@ export const api = {
   resumeLeadSession: (agentId: string, sessionId: string, cwd: string, launch: Launch, teamId: string) =>
     invoke<Omit<NewSessionResult, "sessionId">>("resume_lead_session", { agentId, sessionId, cwd, launch, teamId }),
   taskNote: (taskId: string, text: string) => invoke<void>("task_note", { taskId, text }),
+  inboxPush: (agentId: string, sessionId: string, id: string, text: string, attachments: string[] = []) =>
+    invoke<void>("inbox_push", { agentId, sessionId, id, text, attachments }),
+  inboxRemove: (agentId: string, sessionId: string, id: string) =>
+    invoke<boolean>("inbox_remove", { agentId, sessionId, id }),
+  inboxTake: (agentId: string, sessionId: string) => invoke<InboxItem[]>("inbox_take", { agentId, sessionId }),
   listUnmerged: (workspace: string) => invoke<UnmergedPatch[]>("list_unmerged", { workspace }),
   applyUnmerged: (workspace: string, file: string) =>
     invoke<ApplyOutcome>("apply_unmerged", { workspace, file }),
@@ -330,6 +341,8 @@ export interface HubEvents {
   onTaskSession: (e: TaskSessionEvent) => void;
   /** `attachments`: file paths the lead sent with the follow-up. */
   onTaskBrief: (task: TaskInfo, text: string, attachments: string[]) => void;
+  /** Queued messages were drained and delivered to a lead mid-turn via a tool result. */
+  onInboxDelivered: (agentId: string, sessionId: string, items: InboxItem[]) => void;
   /** An account's plan limits, read with the agent's usage command (Antigravity). */
   onAccountUsage: (agentId: string, profileId: string, usage: unknown) => void;
 }
@@ -366,6 +379,9 @@ export async function subscribe(h: HubEvents): Promise<UnlistenFn> {
     listen<TaskSessionEvent>("task-session", (e) => h.onTaskSession(e.payload)),
     listen<{ task: TaskInfo; text: string; attachments?: string[] }>("task-brief", (e) =>
       h.onTaskBrief(e.payload.task, e.payload.text, e.payload.attachments ?? []),
+    ),
+    listen<{ agentId: string; sessionId: string; items: InboxItem[] }>("inbox-delivered", (e) =>
+      h.onInboxDelivered(e.payload.agentId, e.payload.sessionId, e.payload.items ?? []),
     ),
     listen<{ agentId: string; profileId: string; usage: unknown }>("account-usage", (e) =>
       h.onAccountUsage(e.payload.agentId, e.payload.profileId, e.payload.usage),

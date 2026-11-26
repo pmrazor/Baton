@@ -5,11 +5,13 @@ import {
   ArrowUp,
   Bot,
   ChevronDown,
+  Paperclip,
   Plus,
   ShieldCheck,
   SlidersHorizontal,
   Square,
   Users,
+  X,
 } from "lucide-react";
 import AttachmentView from "./AttachmentView";
 import { api, toHubError } from "../api";
@@ -50,6 +52,8 @@ interface Props {
   /** Restart the draft with a different launch option (only before the first message). */
   onSetLaunch: (optionId: string, value: string) => void;
   onSend: (text: string, attachments: Attachment[]) => void;
+  onQueue: (text: string, attachments: Attachment[]) => void;
+  onUnqueue: (id: string) => void;
   onCancel: () => void;
   onSetConfig: (configId: string, value: unknown) => void;
   onSetMode: (modeId: string) => void;
@@ -137,7 +141,7 @@ export default function Composer(p: Props) {
   }, [draft]);
 
   // Files dropped anywhere on the window are attached to this message.
-  const canAttach = ready && !busy;
+  const canAttach = ready;
   const canAttachRef = useRef(canAttach);
   canAttachRef.current = canAttach;
   useEffect(() => {
@@ -192,13 +196,17 @@ export default function Composer(p: Props) {
     }
   };
 
+  const hasDraft = !!(draft.trim() || attachments.length > 0);
+  const queued = p.session?.queued ?? [];
+
   const submit = () => {
     const text = draft.trim();
-    if ((!text && attachments.length === 0) || busy || !ready) return;
+    if ((!text && attachments.length === 0) || !ready) return;
     setDraft("");
     setAttachments([]);
     setAttachError(null);
-    p.onSend(text, attachments);
+    if (busy) p.onQueue(text, attachments);
+    else p.onSend(text, attachments);
   };
 
   return (
@@ -222,6 +230,40 @@ export default function Composer(p: Props) {
               {label}
             </button>
           ))}
+        </div>
+      )}
+      {queued.length > 0 && (
+        <div className="queued-list" aria-label="대기 중인 메시지">
+          <div className="queued-head">
+            응답이 끝나면 이어서 보내요
+            {p.session?.lead && " · 총괄이 도구를 쓸 때 먼저 전달될 수 있어요"}
+          </div>
+          {queued.map((q) => {
+            const preview = q.text.replace(/\s+/g, " ").trim() || q.attachments.map((a) => a.name).join(", ");
+            return (
+              <div key={q.id} className="queued-row">
+                <span className="queued-preview" title={q.text || preview}>
+                  {preview}
+                </span>
+                {q.text.trim() && q.attachments.length > 0 && (
+                  <span className="queued-attach" title={q.attachments.map((a) => a.name).join(", ")}>
+                    <Paperclip size={11} />
+                    {q.attachments.length}
+                  </span>
+                )}
+                <span className="queued-tag">대기 중</span>
+                <button
+                  type="button"
+                  className="queued-remove"
+                  title="대기열에서 삭제"
+                  aria-label="대기열에서 삭제"
+                  onClick={() => p.onUnqueue(q.id)}
+                >
+                  <X size={13} />
+                </button>
+              </div>
+            );
+          })}
         </div>
       )}
       <div className={`composer ${dragging ? "dragging" : ""}`}>
@@ -272,6 +314,8 @@ export default function Composer(p: Props) {
                 ? "끝난 작업은 이어서 대화할 수 없어요"
               : p.session?.attachError
                 ? "연결되지 않은 대화예요 · 위의 [다시 시도]를 눌러 주세요"
+              : busy
+                ? "응답 중에도 추가 메시지를 입력할 수 있어요"
               : p.isTask
                 ? "이 작업에 직접 지시하기 (총괄도 내용을 받아요)"
                 : p.agentMode
@@ -316,20 +360,29 @@ export default function Composer(p: Props) {
             }
           }}
         />
-        {busy ? (
-          <button className="send stop" title="중단" onClick={p.onCancel}>
-            <Square size={12} fill="currentColor" />
-          </button>
-        ) : (
-          <button
-            className="send"
-            title="전송 (Enter)"
-            disabled={(!draft.trim() && attachments.length === 0) || !ready}
-            onClick={submit}
-          >
-            {p.connecting ? <span className="spinner light" /> : <ArrowUp size={17} />}
-          </button>
-        )}
+        <div className="composer-actions">
+          {busy ? (
+            <>
+              {hasDraft && ready && (
+                <button className="send" title="대기열에 추가 (Enter)" aria-label="대기열에 추가" onClick={submit}>
+                  <ArrowUp size={17} />
+                </button>
+              )}
+              <button className="send stop" title="중단" aria-label="중단" onClick={p.onCancel}>
+                <Square size={12} fill="currentColor" />
+              </button>
+            </>
+          ) : (
+            <button
+              className="send"
+              title="전송 (Enter)"
+              disabled={!hasDraft || !ready}
+              onClick={submit}
+            >
+              {p.connecting ? <span className="spinner light" /> : <ArrowUp size={17} />}
+            </button>
+          )}
+        </div>
       </div>
       <div className="composer-meta">
         <Popover

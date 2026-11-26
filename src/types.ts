@@ -139,7 +139,16 @@ export interface PlanEntry {
 }
 
 export type ChatItem =
-  | { kind: "user"; id: string; text: string; startedAt?: number; durationMs?: number; attachments?: Attachment[] }
+  | {
+      kind: "user";
+      id: string;
+      text: string;
+      startedAt?: number;
+      durationMs?: number;
+      attachments?: Attachment[];
+      /** Small note over the bubble, e.g. a message delivered while the agent was working. */
+      tag?: string;
+    }
   /** An instruction a lead agent gave this task (agent mode). Starts a turn like a user message. */
   | {
       kind: "brief";
@@ -195,6 +204,12 @@ export interface SessionModes {
   availableModes: { id: string; name: string; description?: string | null }[];
 }
 
+export interface QueuedMessage {
+  id: string;
+  text: string;
+  attachments: Attachment[];
+}
+
 export interface Session {
   key: string;
   agentId: string;
@@ -236,6 +251,8 @@ export interface Session {
   usage: { used: number; size: number; cost?: { amount: number; currency: string } | null } | null;
   /** Numbers from the last finished turn. */
   lastTurn: TurnStats | null;
+  /** Messages queued while this session is busy (mirrors backend inbox). */
+  queued?: QueuedMessage[];
 }
 
 export interface TurnStats {

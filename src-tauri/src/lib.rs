@@ -325,6 +325,45 @@ fn task_note(orchestra: State<'_, Orchestra>, task_id: String, text: String) {
     orchestra.add_note(&task_id, &text);
 }
 
+#[tauri::command]
+fn inbox_push(
+    orchestra: State<'_, Orchestra>,
+    agent_id: String,
+    session_id: String,
+    id: String,
+    text: String,
+    attachments: Option<Vec<String>>,
+) {
+    orchestra.inbox_push(
+        &agent_id,
+        &session_id,
+        orchestra::InboxItem {
+            id,
+            text,
+            attachments: attachments.unwrap_or_default(),
+        },
+    );
+}
+
+#[tauri::command]
+fn inbox_remove(
+    orchestra: State<'_, Orchestra>,
+    agent_id: String,
+    session_id: String,
+    id: String,
+) -> bool {
+    orchestra.inbox_remove(&agent_id, &session_id, &id)
+}
+
+#[tauri::command]
+fn inbox_take(
+    orchestra: State<'_, Orchestra>,
+    agent_id: String,
+    session_id: String,
+) -> Vec<orchestra::InboxItem> {
+    orchestra.inbox_take(&agent_id, &session_id)
+}
+
 /// Each agent's last reported config options (models, modes, effort).
 #[tauri::command]
 fn agent_options(hub: State<'_, Hub>) -> HashMap<String, Value> {
@@ -496,6 +535,9 @@ pub fn run() {
             new_lead_session,
             resume_lead_session,
             task_note,
+            inbox_push,
+            inbox_remove,
+            inbox_take,
             set_lead_team,
             handoff_lead,
             list_agent_sessions,

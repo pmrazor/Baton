@@ -19,9 +19,12 @@ import type {
   TurnStats,
 } from "./types";
 import { accountKey, attachmentOf, isTaskActive, profileOf, sessionKey } from "./types";
-import type { TaskSessionEvent } from "./api";
+import type { InboxItem, TaskSessionEvent } from "./api";
 import { accountLimit } from "./handoff";
 import { quotasFromUpdate } from "./usage";
+
+/** Label shown on user messages delivered mid-turn through a lead tool result. */
+export const DELIVERED_TAG = "작업 중에 전달됨";
 
 export interface AuthPrompt {
   agentId: string;
@@ -102,6 +105,9 @@ export type Action =
   | { type: "dropDrafts" }
   | { type: "closeSession"; key: string }
   | { type: "userMessage"; key: string; text: string; attachments?: Attachment[]; briefLabel?: string }
+  | { type: "queueMessage"; key: string; id: string; text: string; attachments: Attachment[] }
+  | { type: "unqueueMessage"; key: string; id: string }
+  | { type: "inboxDelivered"; key: string; items: InboxItem[] }
   | { type: "busy"; key: string; busy: boolean }
   | { type: "notice"; key: string; text: string; tone: "info" | "error" }
   | { type: "sessionLimited"; key: string; resetsAt?: number }
@@ -273,24 +279,8 @@ export function reducer(state: State, action: Action): State {
       return { ...state, sessions, activeKey };
     }
     case "userMessage": {
-      const id = nextId();
       const now = Date.now();
-      const item: ChatItem = action.briefLabel
-        ? {
-            kind: "brief",
-            id,
-            text: action.text,
-            label: action.briefLabel,
-            startedAt: now,
-            ...(action.attachments?.length ? { attachments: action.attachments } : {}),
-          }
-        : {
-            kind: "user",
-            id,
-            text: action.text,
-            startedAt: now,
-            ...(action.attachments?.length ? { attachments: action.attachments } : {}),
-          };
+      const item = makeUserItem(action.text, action.attachments, action.briefLabel, now);
       return mapSession(state, action.key, (s) => ({
         ...s,
         title:
@@ -301,10 +291,46 @@ export function reducer(state: State, action: Action): State {
         updatedAt: now,
         // Attach any handed-over tasks that don't have a turn in this session yet.
         tasks: s.tasks?.some((t) => !t.turnId)
-          ? s.tasks.map((t) => (t.turnId ? t : { ...t, turnId: id }))
+          ? s.tasks.map((t) => (t.turnId ? t : { ...t, turnId: item.id }))
           : s.tasks,
         items: [...s.items, item],
       }));
+    }
+    case "queueMessage":
+      return mapSession(state, action.key, (s) => ({
+        ...s,
+        queued: [...(s.queued ?? []), { id: action.id, text: action.text, attachments: action.attachments }],
+      }));
+    case "unqueueMessage":
+      return mapSession(state, action.key, (s) => ({
+        ...s,
+        queued: s.queued?.filter((q) => q.id !== action.id),
+      }));
+    case "inboxDelivered": {
+      if (action.items.length === 0) return state;
+      const deliveredIds = new Set(action.items.map((it) => it.id));
+      const now = Date.now();
+      return mapSession(state, action.key, (s) => {
+        const queued = s.queued?.filter((q) => !deliveredIds.has(q.id));
+        const added = action.items.map(
+          (it) =>
+            ({
+              ...makeUserItem(it.text, it.attachments.map(attachmentOf), undefined, now),
+              tag: DELIVERED_TAG,
+            }) as ChatItem,
+        );
+        const firstId = added[0].id;
+        return {
+          ...s,
+          queued,
+          draft: false,
+          updatedAt: now,
+          tasks: s.tasks?.some((t) => !t.turnId)
+            ? s.tasks.map((t) => (t.turnId ? t : { ...t, turnId: firstId }))
+            : s.tasks,
+          items: [...stampTurnDuration(s.items), ...added],
+        };
+      });
     }
     case "busy":
       return mapSession(state, action.key, (s) => ({
@@ -686,6 +712,27 @@ function upsertTool(items: ChatItem[], u: Partial<ToolCallFields> & { toolCallId
     return [...items, fresh];
   }
   return items.map((it, i) => (i === idx ? ({ ...it, ...patch } as ToolItem) : it));
+}
+
+/** Build a user or labeled-brief chat item for a turn. */
+function makeUserItem(text: string, attachments?: Attachment[], briefLabel?: string, now = Date.now()): ChatItem {
+  const id = nextId();
+  return briefLabel
+    ? {
+        kind: "brief",
+        id,
+        text,
+        label: briefLabel,
+        startedAt: now,
+        ...(attachments?.length ? { attachments } : {}),
+      }
+    : {
+        kind: "user",
+        id,
+        text,
+        startedAt: now,
+        ...(attachments?.length ? { attachments } : {}),
+      };
 }
 
 /** A brief's `attachments` field, left out when the lead sent no files. */

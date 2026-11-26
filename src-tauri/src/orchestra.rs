@@ -7,9 +7,10 @@
 //! the final answer, and serialises file-writing tasks per workspace.
 //!
 //! Events for the UI:
-//!   - `task-update`   a task's status changed (TaskInfo)
-//!   - `task-session`  a task's session exists (so the UI can list it)
-//!   - `task-brief`    the lead sent a follow-up instruction to a task
+//!   - `task-update`      a task's status changed (TaskInfo)
+//!   - `task-session`     a task's session exists (so the UI can list it)
+//!   - `task-brief`       the lead sent a follow-up instruction to a task
+//!   - `inbox-delivered`  queued user messages were delivered in a tool result
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -65,6 +66,7 @@ You can hand work to team members with the baton tools:
 - Delegating is the default: the user turned on agent mode to have the team do the work. Do a task yourself only
   when the whole request is a quick question or a one-line change.
 - The user can message a member directly; those messages come back to you as user_notes.
+- Tool results may carry user_messages the user typed meanwhile; follow them.
 - Answer the user in the language they used.";
 
 /// Sent ahead of each user message to a lead (not shown in the UI). Server
@@ -76,8 +78,11 @@ The user turned on agent mode: split the work across your team instead of doing 
 2. Hand out the implementation work with baton delegate, choosing members by role and remaining usage. Read-only
    tasks run in parallel; file-writing tasks run one at a time.
 3. Use baton wait to collect results, review them (read the changed files), follow up or fix, then report back.
+Tool results may carry user_messages the user typed meanwhile; follow them.
 Work alone only if the whole request is a quick question or a one-line change.
 ";
+
+const USER_MESSAGES_NOTE: &str = "The user sent these messages while you were working. Read them now and adjust your plan; they will not be sent again.";
 
 /// Heads the list of a lead message's attachments. The UI strips it from
 /// replayed messages, so keep the two in sync (`cleanReplay` in store.ts).
@@ -159,12 +164,58 @@ struct Task {
     attachments: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InboxItem {
+    pub id: String,
+    pub text: String,
+    pub attachments: Vec<String>,
+}
+
+/// Per-session queue of user messages typed while an agent is busy.
+#[derive(Default)]
+struct Inbox {
+    items: Mutex<HashMap<(String, String), Vec<InboxItem>>>,
+}
+
+impl Inbox {
+    fn push(&self, agent_id: &str, session_id: &str, item: InboxItem) {
+        self.items
+            .lock()
+            .unwrap()
+            .entry((agent_id.into(), session_id.into()))
+            .or_default()
+            .push(item);
+    }
+
+    fn remove(&self, agent_id: &str, session_id: &str, id: &str) -> bool {
+        let mut map = self.items.lock().unwrap();
+        let key = (agent_id.to_string(), session_id.to_string());
+        let Some(list) = map.get_mut(&key) else { return false };
+        let Some(pos) = list.iter().position(|it| it.id == id) else { return false };
+        list.remove(pos);
+        if list.is_empty() {
+            map.remove(&key);
+        }
+        true
+    }
+
+    fn take(&self, agent_id: &str, session_id: &str) -> Vec<InboxItem> {
+        self.items
+            .lock()
+            .unwrap()
+            .remove(&(agent_id.to_string(), session_id.to_string()))
+            .unwrap_or_default()
+    }
+}
+
 pub struct Orchestra {
     app: AppHandle,
     port: u16,
     leads: Mutex<HashMap<String, Lead>>,
     tasks: Mutex<HashMap<String, Task>>,
     by_session: Mutex<HashMap<(String, String), String>>,
+    inbox: Inbox,
     write_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Unix seconds until which an (agent, profile, model) can't run, from
     /// limit errors: plan-limit reports can lag behind.
@@ -223,6 +274,7 @@ impl Orchestra {
             leads: Default::default(),
             tasks: Default::default(),
             by_session: Default::default(),
+            inbox: Default::default(),
             write_locks: Default::default(),
             limits: Default::default(),
             next_task: AtomicU64::new(1),
@@ -346,6 +398,18 @@ impl Orchestra {
         if let Some(task) = self.tasks.lock().unwrap().get_mut(task_id) {
             task.notes.push(text.to_string());
         }
+    }
+
+    pub fn inbox_push(&self, agent_id: &str, session_id: &str, item: InboxItem) {
+        self.inbox.push(agent_id, session_id, item);
+    }
+
+    pub fn inbox_remove(&self, agent_id: &str, session_id: &str, id: &str) -> bool {
+        self.inbox.remove(agent_id, session_id, id)
+    }
+
+    pub fn inbox_take(&self, agent_id: &str, session_id: &str) -> Vec<InboxItem> {
+        self.inbox.take(agent_id, session_id)
     }
 
     /// Stop everything a lead started (when the user stops the lead).
@@ -767,7 +831,7 @@ impl Orchestra {
     }
 
     async fn call_tool(&self, token: &str, lead: &Lead, name: &str, args: &Value) -> Result<Value, String> {
-        match name {
+        let mut res = match name {
             "list_agents" => Ok(self.list_agents(lead)),
             "delegate" => self.delegate(token, lead, args),
             "wait" => Ok(self.wait(args).await),
@@ -789,7 +853,47 @@ impl Orchestra {
                 self.discard(id).await
             }
             other => Err(format!("unknown tool '{other}'")),
+        }?;
+        let session_id = lead.session_id.clone().or_else(|| self.lead(token).and_then(|l| l.session_id));
+        if let Some(session_id) = session_id {
+            let items = self.inbox_take(&lead.agent_id, &session_id);
+            if !items.is_empty() {
+                res = inject_user_messages(res, &items);
+                let _ = self.app.emit(
+                    "inbox-delivered",
+                    json!({
+                        "agentId": lead.agent_id,
+                        "sessionId": session_id,
+                        "items": items,
+                    }),
+                );
+            }
         }
+        Ok(res)
+    }
+}
+
+/// Attach mid-turn queued user messages to a Baton MCP tool result.
+/// Non-object results are wrapped in `{ "result": ... }` so the fields fit.
+fn inject_user_messages(result: Value, items: &[InboxItem]) -> Value {
+    if items.is_empty() {
+        return result;
+    }
+    let messages: Vec<Value> = items
+        .iter()
+        .map(|it| json!({ "text": it.text, "attachments": it.attachments }))
+        .collect();
+    match result {
+        Value::Object(mut map) => {
+            map.insert("user_messages".into(), Value::Array(messages));
+            map.insert("user_messages_note".into(), Value::String(USER_MESSAGES_NOTE.into()));
+            Value::Object(map)
+        }
+        other => json!({
+            "result": other,
+            "user_messages": messages,
+            "user_messages_note": USER_MESSAGES_NOTE,
+        }),
     }
 }
 
@@ -2124,5 +2228,64 @@ mod tests {
             json!(["claude-opus-5-5 → antigravity-claude-opus-5-5 (usage limit)"])
         );
         assert_eq!(serialized["limitHit"], json!(true));
+    }
+
+    #[test]
+    fn inbox_push_remove_and_take_preserve_order_and_drain() {
+        let inbox = Inbox::default();
+        let item = |id: &str, text: &str, files: &[&str]| InboxItem {
+            id: id.into(),
+            text: text.into(),
+            attachments: files.iter().map(|s| s.to_string()).collect(),
+        };
+
+        inbox.push("claude", "s1", item("1", "first", &[]));
+        inbox.push("claude", "s1", item("2", "second", &["/a.png"]));
+        inbox.push("claude", "s1", item("3", "third", &[]));
+        inbox.push("claude", "s2", item("9", "other session", &[]));
+        inbox.push("codex", "s1", item("8", "other agent", &[]));
+
+        assert!(inbox.remove("claude", "s1", "2"));
+        assert!(!inbox.remove("claude", "s1", "2"), "already removed");
+        assert!(!inbox.remove("claude", "missing", "1"));
+
+        let taken = inbox.take("claude", "s1");
+        assert_eq!(taken, vec![item("1", "first", &[]), item("3", "third", &[])]);
+        assert!(inbox.take("claude", "s1").is_empty(), "take drains the queue");
+
+        assert_eq!(inbox.take("claude", "s2"), vec![item("9", "other session", &[])]);
+        assert_eq!(inbox.take("codex", "s1"), vec![item("8", "other agent", &[])]);
+    }
+
+    #[test]
+    fn inject_user_messages_attaches_fields_or_wraps_non_objects() {
+        let items = vec![
+            InboxItem { id: "1".into(), text: "change plan".into(), attachments: vec!["/spec.md".into()] },
+            InboxItem { id: "2".into(), text: "also add tests".into(), attachments: vec![] },
+        ];
+
+        assert_eq!(inject_user_messages(json!({ "ok": true }), &[]), json!({ "ok": true }));
+
+        let obj = inject_user_messages(json!({ "task_id": "t1", "status": "queued" }), &items);
+        assert_eq!(obj["task_id"], json!("t1"));
+        assert_eq!(obj["status"], json!("queued"));
+        assert_eq!(
+            obj["user_messages"],
+            json!([
+                { "text": "change plan", "attachments": ["/spec.md"] },
+                { "text": "also add tests", "attachments": [] },
+            ])
+        );
+        assert_eq!(obj["user_messages_note"], json!(USER_MESSAGES_NOTE));
+
+        let wrapped_arr = inject_user_messages(json!([1, 2]), &items);
+        assert_eq!(wrapped_arr["result"], json!([1, 2]));
+        assert_eq!(wrapped_arr["user_messages"], obj["user_messages"]);
+        assert_eq!(wrapped_arr["user_messages_note"], json!(USER_MESSAGES_NOTE));
+
+        let wrapped_str = inject_user_messages(json!("done"), &items);
+        assert_eq!(wrapped_str["result"], json!("done"));
+        assert_eq!(wrapped_str["user_messages"], obj["user_messages"]);
+        assert_eq!(wrapped_str["user_messages_note"], json!(USER_MESSAGES_NOTE));
     }
 }

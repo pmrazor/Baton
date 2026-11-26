@@ -36,6 +36,8 @@ export interface ChatViewProps {
   onAddWorkspace: () => void;
   onNewChat: (workspace?: string, agentId?: string, launch?: Launch) => void;
   onSend: (session: Session, text: string, attachments: Attachment[]) => void;
+  onQueue: (session: Session, text: string, attachments: Attachment[]) => void;
+  onUnqueue: (session: Session, id: string) => void;
   onCancel: (session: Session) => void;
   onPermission: (key: string, optionId: string | null) => void;
   onSetConfig: (session: Session, configId: string, value: unknown) => void;
@@ -371,6 +373,8 @@ export function ConversationView(p: ChatViewProps & { agentName: (id: string) =>
           agentId && p.onNewChat(state.workspace ?? undefined, agentId, { ...session?.launch, [id]: value })
         }
         onSend={(text, attachments) => session && p.onSend(session, text, attachments)}
+        onQueue={(text, attachments) => session && p.onQueue(session, text, attachments)}
+        onUnqueue={(id) => session && p.onUnqueue(session, id)}
         onCancel={() => session && p.onCancel(session)}
         onSetConfig={(id, v) => session && p.onSetConfig(session, id, v)}
         onSetMode={(id) => session && p.onSetMode(session, id)}

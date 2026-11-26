@@ -119,6 +119,7 @@ export function ChatItemView({
     case "user":
       return (
         <div className="msg-user-wrap">
+          {item.tag && <div className="msg-user-tag">{item.tag}</div>}
           {item.text && <div className="msg-user">{item.text}</div>}
           {item.attachments && item.attachments.length > 0 && (
             <div className="msg-attachments">

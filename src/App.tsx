@@ -3,6 +3,7 @@ import { ask, open } from "@tauri-apps/plugin-dialog";
 import { api, subscribe, toHubError } from "./api";
 import { initialState, reducer, type State } from "./store";
 import {
+  attachmentOf,
   AUTO_TEAM,
   DEFAULT_PROFILE,
   installedAgents,
@@ -64,6 +65,7 @@ function toSaved({
   attachError: _attachError,
   archived: _archived,
   limited: _limited,
+  queued: _queued,
   ...rest
 }: Session) {
   return rest;
@@ -100,6 +102,7 @@ function fromSaved(v: any): Session | null {
     busy: false,
     draft: false,
     attached: false,
+    queued: undefined,
   };
 }
 
@@ -203,6 +206,8 @@ export default function App() {
       onTask: (task) => dispatch({ type: "taskUpdate", task }),
       onTaskSession: (event) => dispatch({ type: "taskSession", event }),
       onTaskBrief: (task, text, attachments) => dispatch({ type: "taskBrief", task, text, attachments }),
+      onInboxDelivered: (agentId, sessionId, items) =>
+        dispatch({ type: "inboxDelivered", key: sessionKey(agentId, sessionId), items }),
       onAccountUsage: (agentId, profileId, usage) =>
         dispatch({ type: "accountUsage", agentId, profileId, quotas: quotasFromUsageReport(usage) }),
     }).then((off) => (disposed ? off() : (unlisten = off)));
@@ -513,6 +518,8 @@ export default function App() {
         dispatch({ type: "closeSession", key: s.key });
         saved.current.delete(s.key);
         if (home) api.deleteSession(home, s.key).catch((e) => console.error("대화 삭제 실패", e));
+        // Drop any pending queued messages for a deleted conversation.
+        api.inboxTake(s.agentId, s.sessionId).catch(() => {});
         // Otherwise "import previous chats" would bring it right back.
         api.deleteAgentSession(s.agentId, s.sessionId, s.cwd, s.launch).catch(() => {});
       }
@@ -520,56 +527,120 @@ export default function App() {
     [state.sessions],
   );
 
+  const queueMessage = useCallback((session: Session, text: string, attachments: Attachment[] = []) => {
+    const id =
+      typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? crypto.randomUUID()
+        : `q-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    // Backend first: if the turn ends in between, its drain already sends the
+    // message, and the idle-drain effect clears the late mirror entry.
+    api
+      .inboxPush(
+        session.agentId,
+        session.sessionId,
+        id,
+        text,
+        attachments.map((a) => a.path),
+      )
+      .then(() => dispatch({ type: "queueMessage", key: session.key, id, text, attachments }))
+      .catch((e) => dispatch({ type: "notice", key: session.key, text: toHubError(e).message, tone: "error" }));
+  }, []);
+
+  const unqueueMessage = useCallback((session: Session, id: string) => {
+    dispatch({ type: "unqueueMessage", key: session.key, id });
+    api.inboxRemove(session.agentId, session.sessionId, id).catch(() => {});
+  }, []);
+
   const sendPrompt = useCallback(
     async (session: PromptTarget, text: string, attachments: Attachment[] = [], briefLabel?: string) => {
       const { key, agentId, sessionId } = session;
       const profileId = profileOf(session.launch);
-      // A message typed into a delegated task also reaches its lead.
-      if (session.parent) {
-        const files = attachments.length ? `\n(첨부: ${attachments.map((a) => a.path).join(", ")})` : "";
-        api.taskNote(session.parent.taskId, text + files).catch(() => {});
-      }
-      dispatch({ type: "userMessage", key, text, attachments, briefLabel });
-      dispatch({ type: "busy", key, busy: true });
-      const started = performance.now();
-      try {
-        const res = await api.sendPrompt(
-          agentId,
-          sessionId,
-          text,
-          attachments.map((a) => a.path),
-        );
-        dispatch({
-          type: "turnDone",
-          key,
-          stats: {
-            durationMs: performance.now() - started,
-            inputTokens: res.usage?.inputTokens,
-            outputTokens: res.usage?.outputTokens,
-            cachedReadTokens: res.usage?.cachedReadTokens,
-          },
-        });
-        if (res.stopReason === "cancelled") dispatch({ type: "notice", key, text: "중단됨", tone: "info" });
-        else if (res.stopReason === "refusal") dispatch({ type: "notice", key, text: "에이전트가 요청을 거절했습니다", tone: "error" });
-        else if (res.stopReason !== "end_turn") dispatch({ type: "notice", key, text: `종료: ${res.stopReason}`, tone: "info" });
-      } catch (e) {
-        const err = toHubError(e);
-        dispatch({ type: "notice", key, text: err.message, tone: "error" });
-        if (session.lead && isLimitError(err.message)) {
-          dispatch({ type: "sessionLimited", key });
+      let nextText = text;
+      let nextAttachments = attachments;
+      let nextBriefLabel = briefLabel;
+      while (true) {
+        // A message typed into a delegated task also reaches its lead.
+        if (session.parent) {
+          const files = nextAttachments.length ? `\n(첨부: ${nextAttachments.map((a) => a.path).join(", ")})` : "";
+          api.taskNote(session.parent.taskId, nextText + files).catch(() => {});
         }
-        if (err.authRequired) {
+        dispatch({ type: "userMessage", key, text: nextText, attachments: nextAttachments, briefLabel: nextBriefLabel });
+        dispatch({ type: "busy", key, busy: true });
+        const started = performance.now();
+        try {
+          const res = await api.sendPrompt(
+            agentId,
+            sessionId,
+            nextText,
+            nextAttachments.map((a) => a.path),
+          );
           dispatch({
-            type: "authPrompt",
-            prompt: { agentId, profileId, message: "로그인이 필요합니다.", methods: err.authMethods ?? [] },
+            type: "turnDone",
+            key,
+            stats: {
+              durationMs: performance.now() - started,
+              inputTokens: res.usage?.inputTokens,
+              outputTokens: res.usage?.outputTokens,
+              cachedReadTokens: res.usage?.cachedReadTokens,
+            },
           });
+          if (res.stopReason === "cancelled") dispatch({ type: "notice", key, text: "중단됨", tone: "info" });
+          else if (res.stopReason === "refusal") dispatch({ type: "notice", key, text: "에이전트가 요청을 거절했습니다", tone: "error" });
+          else if (res.stopReason !== "end_turn") dispatch({ type: "notice", key, text: `종료: ${res.stopReason}`, tone: "info" });
+        } catch (e) {
+          const err = toHubError(e);
+          dispatch({ type: "notice", key, text: err.message, tone: "error" });
+          if (session.lead && isLimitError(err.message)) {
+            dispatch({ type: "sessionLimited", key });
+          }
+          if (err.authRequired) {
+            dispatch({
+              type: "authPrompt",
+              prompt: { agentId, profileId, message: "로그인이 필요합니다.", methods: err.authMethods ?? [] },
+            });
+          }
+        } finally {
+          dispatch({ type: "busy", key, busy: false });
         }
-      } finally {
-        dispatch({ type: "busy", key, busy: false });
+        // Drain anything queued while the agent was busy (including after cancel: "stop and send now").
+        const taken = await api.inboxTake(agentId, sessionId).catch(() => []);
+        if (taken.length === 0) break;
+        for (const item of taken) {
+          dispatch({ type: "unqueueMessage", key, id: item.id });
+        }
+        nextText = taken.map((i) => i.text).filter(Boolean).join("\n\n");
+        nextAttachments = taken.flatMap((i) => i.attachments).map(attachmentOf);
+        nextBriefLabel = undefined;
       }
     },
     [],
   );
+
+  // Messages queued while a turn ran that sendPrompt didn't start (a delegated
+  // task's run, driven by the backend) go out once the chat is idle. The
+  // backend inbox is the source of truth: taking it is atomic, so this and
+  // sendPrompt's own drain never send the same message twice.
+  const draining = useRef(new Set<string>());
+  useEffect(() => {
+    for (const s of state.sessions) {
+      if (!s.queued?.length || s.busy || s.draft || draining.current.has(s.key)) continue;
+      draining.current.add(s.key);
+      const waiting = s.queued.map((q) => q.id);
+      api
+        .inboxTake(s.agentId, s.sessionId)
+        .catch(() => [])
+        .then((taken) => {
+          // Whatever the mirror still lists is gone from the backend now.
+          for (const id of new Set([...waiting, ...taken.map((i) => i.id)])) {
+            dispatch({ type: "unqueueMessage", key: s.key, id });
+          }
+          if (taken.length === 0) return;
+          const text = taken.map((i) => i.text).filter(Boolean).join("\n\n");
+          return sendPrompt(s, text, taken.flatMap((i) => i.attachments).map(attachmentOf));
+        })
+        .finally(() => draining.current.delete(s.key));
+    }
+  }, [state.sessions, sendPrompt]);
 
   /** Hand a rate-limited lead conversation and its tasks over to another agent. */
   const handoffLead = useCallback(
@@ -664,6 +735,8 @@ export default function App() {
     onAddWorkspace: addWorkspace,
     onNewChat: newChat,
     onSend: sendPrompt,
+    onQueue: queueMessage,
+    onUnqueue: unqueueMessage,
     onCancel: cancel,
     onPermission: answerPermission,
     onSetConfig: setConfig,
