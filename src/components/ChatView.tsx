@@ -14,6 +14,7 @@ import {
   type Launch,
   type Session,
 } from "../types";
+import { otherWorkInFolder } from "../concurrency";
 import Composer from "./Composer";
 import UnmergedBanner from "./UnmergedBanner";
 import { ChatRootContext, ToolRow } from "./Messages";
@@ -383,6 +384,8 @@ export function ConversationView(p: ChatViewProps & { agentName: (id: string) =>
         teams={state.teams}
         isTask={!!session?.parent}
         onChangeMode={p.onChangeMode}
+        otherWork={session && !session.parent ? otherWorkInFolder(state.sessions, session) : []}
+        onOpenSession={p.onOpenSession}
       />
     </ChatRootContext.Provider>
   );

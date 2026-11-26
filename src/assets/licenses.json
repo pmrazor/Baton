@@ -228,6 +228,13 @@
    "source": "npm"
   },
   {
+   "name": "@tauri-apps/plugin-notification",
+   "version": "2.8.1",
+   "license": "MIT OR Apache-2.0",
+   "url": "https://github.com/tauri-apps/plugins-workspace",
+   "source": "npm"
+  },
+  {
    "name": "@tauri-apps/plugin-opener",
    "version": "2.7.3",
    "license": "MIT OR Apache-2.0",
@@ -715,6 +722,13 @@
    "version": "1.0.5",
    "license": "MIT OR Apache-2.0",
    "url": "https://github.com/rust-lang/cfg-if",
+   "source": "cargo"
+  },
+  {
+   "name": "chacha20",
+   "version": "0.10.2",
+   "license": "MIT OR Apache-2.0",
+   "url": "https://github.com/RustCrypto/stream-ciphers",
    "source": "cargo"
   },
   {
@@ -2076,6 +2090,13 @@
    "source": "npm"
   },
   {
+   "name": "mac-notification-sys",
+   "version": "0.6.15",
+   "license": "MIT/Apache-2.0",
+   "url": "https://github.com/h4llow3En/mac-notification-sys",
+   "source": "cargo"
+  },
+  {
    "name": "markdown-table",
    "version": "3.1.0",
    "license": "MIT",
@@ -2479,6 +2500,13 @@
    "version": "0.32.0",
    "license": "MIT",
    "url": "https://github.com/nix-rust/nix",
+   "source": "cargo"
+  },
+  {
+   "name": "notify-rust",
+   "version": "4.19.0",
+   "license": "MIT OR Apache-2.0",
+   "url": "https://github.com/hoodie/notify-rust",
    "source": "cargo"
   },
   {
@@ -2962,6 +2990,20 @@
    "version": "6.0.0",
    "license": "MIT OR Apache-2.0 OR LGPL-2.1-or-later",
    "url": "https://github.com/r-efi/r-efi",
+   "source": "cargo"
+  },
+  {
+   "name": "rand",
+   "version": "0.10.3",
+   "license": "MIT OR Apache-2.0",
+   "url": "https://github.com/rust-random/rand",
+   "source": "cargo"
+  },
+  {
+   "name": "rand_core",
+   "version": "0.10.1",
+   "license": "MIT OR Apache-2.0",
+   "url": "https://github.com/rust-random/rand_core",
    "source": "cargo"
   },
   {
@@ -3707,6 +3749,13 @@
    "source": "cargo"
   },
   {
+   "name": "tauri-plugin-notification",
+   "version": "2.8.1",
+   "license": "Apache-2.0 OR MIT",
+   "url": "https://github.com/tauri-apps/plugins-workspace",
+   "source": "cargo"
+  },
+  {
    "name": "tauri-plugin-opener",
    "version": "2.7.3",
    "license": "Apache-2.0 OR MIT",
@@ -3753,6 +3802,13 @@
    "version": "0.3.7",
    "license": "MIT",
    "url": "https://github.com/tauri-apps/winres",
+   "source": "cargo"
+  },
+  {
+   "name": "tauri-winrt-notification",
+   "version": "0.8.1",
+   "license": "MIT OR Apache-2.0",
+   "url": "https://github.com/tauri-apps/winrt-notification",
    "source": "cargo"
   },
   {
@@ -4708,6 +4764,13 @@
    "source": "cargo"
   },
   {
+   "name": "zbus",
+   "version": "6.2.1",
+   "license": "MIT",
+   "url": "https://github.com/z-galaxy/zbus/",
+   "source": "cargo"
+  },
+  {
    "name": "zbus_macros",
    "version": "5.19.0",
    "license": "MIT",
@@ -4715,8 +4778,22 @@
    "source": "cargo"
   },
   {
+   "name": "zbus_macros",
+   "version": "6.2.1",
+   "license": "MIT",
+   "url": "https://github.com/z-galaxy/zbus/",
+   "source": "cargo"
+  },
+  {
    "name": "zbus_names",
    "version": "4.3.5",
+   "license": "MIT",
+   "url": "https://github.com/z-galaxy/zbus/",
+   "source": "cargo"
+  },
+  {
+   "name": "zbus_utils",
+   "version": "6.1.0",
    "license": "MIT",
    "url": "https://github.com/z-galaxy/zbus/",
    "source": "cargo"
@@ -4796,6 +4873,13 @@
    "version": "1.0.23",
    "license": "MIT",
    "url": "https://github.com/dtolnay/zmij",
+   "source": "cargo"
+  },
+  {
+   "name": "zruntime",
+   "version": "0.2.2",
+   "license": "MIT",
+   "url": "https://github.com/z-galaxy/zruntime",
    "source": "cargo"
   },
   {

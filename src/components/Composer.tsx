@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "re
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import {
+  AlertTriangle,
   ArrowUp,
   Bot,
   ChevronDown,
@@ -64,6 +65,9 @@ interface Props {
   /** This chat is a task delegated by a lead. */
   isTask: boolean;
   onChangeMode: (opts: { lead?: boolean; team?: string }) => void;
+  /** Other conversations working in this session's folder right now. */
+  otherWork: Session[];
+  onOpenSession: (key: string) => void;
 }
 
 type Group = { group?: string; name: string; options: SelectOption[] };
@@ -198,6 +202,10 @@ export default function Composer(p: Props) {
 
   const hasDraft = !!(draft.trim() || attachments.length > 0);
   const queued = p.session?.queued ?? [];
+  const [dismissedWork, setDismissedWork] = useState<{ session: string; sig: string } | null>(null);
+  const workSig = p.otherWork.map((s) => s.key).sort().join("|");
+  const showWork =
+    !!p.session && p.otherWork.length > 0 && !(dismissedWork?.session === p.session.key && dismissedWork.sig === workSig);
 
   const submit = () => {
     const text = draft.trim();
@@ -230,6 +238,30 @@ export default function Composer(p: Props) {
               {label}
             </button>
           ))}
+        </div>
+      )}
+      {showWork && p.session && (
+        <div className="folder-warning" role="status">
+          <AlertTriangle size={14} className="folder-warning-icon" />
+          <div className="folder-warning-body">
+            <span>같은 폴더에서 다른 대화가 작업 중이에요 · 같은 파일을 고치면 서로 덮어쓸 수 있어요</span>
+            <span className="folder-warning-list">
+              {p.otherWork.slice(0, 3).map((s) => (
+                <button key={s.key} className="folder-warning-chip" title={s.title} onClick={() => p.onOpenSession(s.key)}>
+                  {s.title || "새 대화"}
+                </button>
+              ))}
+              {p.otherWork.length > 3 && <span>외 {p.otherWork.length - 3}개</span>}
+            </span>
+          </div>
+          <button
+            className="folder-warning-close"
+            title="닫기"
+            aria-label="닫기"
+            onClick={() => setDismissedWork({ session: p.session!.key, sig: workSig })}
+          >
+            <X size={12} />
+          </button>
         </div>
       )}
       {queued.length > 0 && (

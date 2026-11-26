@@ -13,6 +13,7 @@ import { ask } from "@tauri-apps/plugin-dialog";
 import { api, toFsError, type FsError, type GitDiffTexts } from "../../api";
 import { attachToComposer, insertIntoComposer } from "../../composerBus";
 import ContextMenu from "../ContextMenu";
+import { readBlamePref, writeBlamePref } from "./blameGutter";
 import {
   buildEditorMenuSections,
   buildEditorTabMenuSections,
@@ -37,6 +38,7 @@ import {
   getRootEditorView,
   onTabClosed,
   onTabRenamed,
+  openDiff,
   openFile,
   registerRoot,
   revealInTree,
@@ -80,6 +82,7 @@ interface TabRuntime {
 
 const POLL_INTERVAL_MS = 2000;
 const DIFF_POLL_INTERVAL_MS = 3000;
+const GIT_BASE_POLL_INTERVAL_MS = 4000;
 const DIFF_MODE_STORAGE_KEY = "baton.diffViewMode";
 const PLATFORM = detectPlatform();
 
@@ -123,11 +126,13 @@ function sameDiffTexts(a: GitDiffTexts | null, b: GitDiffTexts): boolean {
 
 const runtimes = new Map<string, TabRuntime>();
 const inflightLoads = new Set<string>();
+const gitBaseSeq = new Map<string, number>();
 
 onTabClosed((root, id) => {
   const k = keyOf(root, id);
   runtimes.delete(k);
   inflightLoads.delete(k);
+  gitBaseSeq.delete(k);
 });
 
 onTabRenamed((root, fromId, toId) => {
@@ -142,6 +147,7 @@ onTabRenamed((root, fromId, toId) => {
   if (inflightLoads.delete(oldKey)) {
     inflightLoads.add(newKey);
   }
+  gitBaseSeq.delete(oldKey);
 });
 
 function getRuntime(key: string): TabRuntime {
@@ -180,6 +186,8 @@ export default function CodeEditor({ root }: CodeEditorProps) {
   const [diffMode, setDiffMode] = useState<DiffViewMode>(readDiffViewMode);
   const [menu, setMenu] = useState<{ x: number; y: number; tabId: string } | null>(null);
   const [editorMenu, setEditorMenu] = useState<EditorAreaMenuState | null>(null);
+  const [blameOn, setBlameOn] = useState(readBlamePref);
+  const blameSyncRef = useRef<() => void>(() => undefined);
 
   const stripRef = useRef<HTMLDivElement>(null);
   const cmHostRef = useRef<HTMLDivElement>(null);
@@ -223,12 +231,44 @@ export default function CodeEditor({ root }: CodeEditorProps) {
     onContextMenu: () => undefined,
   });
 
+  const refreshGitBase = useCallback(
+    async (tabRoot: string, tabId: string, path: string): Promise<boolean> => {
+      const k = keyOf(tabRoot, tabId);
+      const seq = (gitBaseSeq.get(k) ?? 0) + 1;
+      gitBaseSeq.set(k, seq);
+      let base: string | null = null;
+      let isRepo = true;
+      try {
+        const diff = await api.gitDiffTexts(tabRoot, path, false);
+        // No base (untracked, or ignored like .env): no markers rather than an all-green file.
+        base = diff.binary ? null : diff.original;
+      } catch (err) {
+        base = null;
+        if (toFsError(err).kind === "invalid_path") {
+          isRepo = false;
+        }
+      }
+      if (gitBaseSeq.get(k) !== seq) return isRepo;
+      const tab = getRootEditorView(tabRoot).tabs.find(
+        (t) => t.id === tabId && t.kind === "file" && t.path === path,
+      );
+      if (!tab) return isRepo;
+      const engine = engineRef.current ?? (await loadEngine());
+      engineRef.current = engine;
+      if (gitBaseSeq.get(k) !== seq) return isRepo;
+      engine.setSessionGitBase(k, base, cmViewRef.current);
+      return isRepo;
+    },
+    [],
+  );
+
   const reloadTabFromDisk = useCallback(
     async (tabRoot: string, tabId: string) => {
       const tab = getRootEditorView(tabRoot).tabs.find((t) => t.id === tabId && t.kind === "file");
       if (!tab) return;
       const k = keyOf(tabRoot, tabId);
       const rt = getRuntime(k);
+      const wasReady = rt.load.status === "ready";
       try {
         const [content, engine] = await Promise.all([api.fsRead(tabRoot, tab.path), loadEngine()]);
         engineRef.current = engine;
@@ -249,6 +289,9 @@ export default function CodeEditor({ root }: CodeEditorProps) {
           deleted: false,
           diskChanged: false,
         });
+        if (wasReady) {
+          void refreshGitBase(tabRoot, tabId, tab.path);
+        }
       } catch (err) {
         if (!getRootEditorView(tabRoot).tabs.some((t) => t.id === tabId)) return;
         const fsErr = toFsError(err);
@@ -265,7 +308,7 @@ export default function CodeEditor({ root }: CodeEditorProps) {
       }
       rerender();
     },
-    [rerender],
+    [refreshGitBase, rerender],
   );
 
   const reloadDiffTab = useCallback(
@@ -397,6 +440,7 @@ export default function CodeEditor({ root }: CodeEditorProps) {
           deleted: false,
           diskChanged: false,
         });
+        void refreshGitBase(tabRoot, tabId, currentTab.path);
         // Keep any clean unstaged diff tab for the same file in sync.
         const matchingDiff = getRootEditorView(tabRoot).tabs.find(
           (t) => t.kind === "diff" && !t.staged && t.path === currentTab.path && !t.dirty,
@@ -428,6 +472,7 @@ export default function CodeEditor({ root }: CodeEditorProps) {
                 deleted: false,
                 diskChanged: false,
               });
+              void refreshGitBase(tabRoot, tabId, currentTab.path);
             } catch (writeErr) {
               rt.load = { status: "error", error: toFsError(writeErr) };
               rerender();
@@ -447,7 +492,7 @@ export default function CodeEditor({ root }: CodeEditorProps) {
         rt.saving = false;
       }
     },
-    [reloadDiffTab, reloadTabFromDisk, rerender],
+    [refreshGitBase, reloadDiffTab, reloadTabFromDisk, rerender],
   );
 
   const saveDiffTab = useCallback(
@@ -594,6 +639,7 @@ export default function CodeEditor({ root }: CodeEditorProps) {
     onSave: () => undefined,
     onAddToChat: () => undefined,
     onContextMenu: () => undefined,
+    onGitMarkerClick: () => undefined,
   });
 
   callbacksRef.current = {
@@ -619,6 +665,14 @@ export default function CodeEditor({ root }: CodeEditorProps) {
       const sepIdx = k.indexOf("\0");
       if (sepIdx < 0) return;
       openEditorAreaMenu(k.slice(0, sepIdx), k.slice(sepIdx + 1), view, x, y);
+    },
+    onGitMarkerClick: (k) => {
+      const sepIdx = k.indexOf("\0");
+      if (sepIdx < 0) return;
+      const tabRoot = k.slice(0, sepIdx);
+      const tabId = k.slice(sepIdx + 1);
+      const tab = getRootEditorView(tabRoot).tabs.find((t) => t.id === tabId && t.kind === "file");
+      if (tab) openDiff(tabRoot, tab.path, { staged: false });
     },
   };
 
@@ -707,6 +761,7 @@ export default function CodeEditor({ root }: CodeEditorProps) {
         onSave: (k) => callbacksRef.current.onSave(k),
         onAddToChat: (k, v) => callbacksRef.current.onAddToChat?.(k, v),
         onContextMenu: (k, v, x, y) => callbacksRef.current.onContextMenu?.(k, v, x, y),
+        onGitMarkerClick: (k, line) => callbacksRef.current.onGitMarkerClick?.(k, line),
       };
 
       if (!cmViewRef.current) {
@@ -716,6 +771,8 @@ export default function CodeEditor({ root }: CodeEditorProps) {
         engine.switchViewSession(cmViewRef.current, session, callbacks);
         activeKeyRef.current = activeKey;
       }
+
+      blameSyncRef.current();
 
       const pending = getRootEditorView(root).jump;
       if (pending && pending.path === active && cmViewRef.current) {
@@ -728,6 +785,44 @@ export default function CodeEditor({ root }: CodeEditorProps) {
       cancelled = true;
     };
   }, [root, active, activeKey, isNormalReady]);
+
+  // Blame gutter: toggle per view, and (re)fetch for the active clean tab when
+  // its saved version (mtime) differs from the blame already loaded in its state.
+  const activeFileTab = activeTab && activeTab.kind === "file" ? activeTab : null;
+  const blamePath = activeFileTab?.path ?? null;
+  const blameDirty = activeFileTab?.dirty ?? false;
+  const blameMtime = activeFileTab?.mtime ?? null;
+  blameSyncRef.current = () => {
+    const view = cmViewRef.current;
+    const engine = engineRef.current;
+    if (!view || !engine || !activeKey || blamePath === null || activeKeyRef.current !== activeKey) return;
+    engine.configureBlame(view, { enabled: blameOn, root, path: blamePath });
+    // Unsaved edits: the on-disk blame can't be trusted for this text, so keep whatever
+    // was mapped through the edits and refresh once saved.
+    if (!blameOn || blameDirty || blameMtime === null) return;
+    if (engine.blameStamp(view.state) === blameMtime) return;
+    const startDoc = view.state.doc;
+    const stamp = blameMtime;
+    const key = activeKey;
+    void api
+      .gitBlame(root, blamePath)
+      .catch(() => [])
+      .then((hunks) => {
+        const v = cmViewRef.current;
+        if (!v || activeKeyRef.current !== key || !v.state.doc.eq(startDoc)) return;
+        engine.applyBlameHunks(v, hunks, stamp);
+      });
+  };
+  useEffect(() => {
+    if (isNormalReady) blameSyncRef.current();
+  }, [blameOn, activeKey, isNormalReady, blamePath, blameDirty, blameMtime, root]);
+
+  const toggleBlame = useCallback(() => {
+    setBlameOn((prev) => {
+      writeBlamePref(!prev);
+      return !prev;
+    });
+  }, []);
 
   // Mount or switch DiffSession DOM when an active diff tab is ready.
   const isDiffReady = isDiffTab && activeRuntime?.load.status === "ready";
@@ -928,6 +1023,42 @@ export default function CodeEditor({ root }: CodeEditorProps) {
     };
   }, [root, activeTabId, activeTabIsDiff, activeTabDirty, reloadDiffTab]);
 
+  // Fetch and keep git base text synced for the active normal file tab's change gutter.
+  const activeNormalPath = !isDiffTab && isNormalReady ? (activeTab?.path ?? null) : null;
+  useEffect(() => {
+    if (!activeTabId || !activeNormalPath) return;
+    let polling = false;
+    let disposed = false;
+    let repoDetected = true;
+
+    const syncBase = async (force: boolean) => {
+      if (polling || disposed) return;
+      if (!force && (document.hidden || !repoDetected)) return;
+      polling = true;
+      try {
+        repoDetected = await refreshGitBase(root, activeTabId, activeNormalPath);
+      } finally {
+        polling = false;
+      }
+    };
+
+    void syncBase(true);
+    const timer = window.setInterval(() => {
+      void syncBase(false);
+    }, GIT_BASE_POLL_INTERVAL_MS);
+    const onFocusOrVisible = () => {
+      if (!document.hidden) void syncBase(true);
+    };
+    window.addEventListener("focus", onFocusOrVisible);
+    document.addEventListener("visibilitychange", onFocusOrVisible);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+      window.removeEventListener("focus", onFocusOrVisible);
+      document.removeEventListener("visibilitychange", onFocusOrVisible);
+    };
+  }, [root, activeTabId, activeNormalPath, refreshGitBase]);
+
   const handleCloseTab = async (tabId: string) => {
     const tab = getRootEditorView(root).tabs.find((t) => t.id === tabId);
     if (!tab) return;
@@ -986,8 +1117,9 @@ export default function CodeEditor({ root }: CodeEditorProps) {
       hasLineContent: editorMenu.hasLineContent,
       readOnly: editorMenu.readOnly,
       platform: PLATFORM,
+      blameOn: editorMenu.view === cmViewRef.current ? blameOn : undefined,
     });
-  }, [editorMenu]);
+  }, [editorMenu, blameOn]);
 
   const handleEditorMenuSelect = (action: EditorMenuActionId) => {
     if (!editorMenu) return;
@@ -1016,6 +1148,10 @@ export default function CodeEditor({ root }: CodeEditorProps) {
         void navigator.clipboard
           .writeText(formatPathWithLines(relPath, startLine, endLine))
           .catch(() => undefined);
+        view.focus();
+        return;
+      case "toggleBlame":
+        toggleBlame();
         view.focus();
         return;
     }
@@ -1141,6 +1277,13 @@ export default function CodeEditor({ root }: CodeEditorProps) {
           ev.preventDefault();
           void sendViewSelectionToChat(root, activeTab.path, view);
         }
+      }
+      return;
+    }
+    if ((ev.metaKey || ev.ctrlKey) && !ev.altKey && ev.shiftKey && ev.key.toLowerCase() === "b") {
+      if (activeTab && activeTab.kind === "file" && isNormalReady) {
+        ev.preventDefault();
+        toggleBlame();
       }
       return;
     }

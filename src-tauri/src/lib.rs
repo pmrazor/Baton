@@ -3,6 +3,7 @@ pub mod agents;
 mod attachments;
 mod files;
 mod git;
+mod gitblame;
 mod gitdiff;
 mod history;
 mod hub;
@@ -504,6 +505,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             legacy::migrate(app.handle());
             let dir = app.path().app_config_dir()?;
@@ -607,6 +609,7 @@ pub fn run() {
             git::git_branch_at,
             git::git_refs_stamp,
             gitdiff::git_diff_texts,
+            gitblame::git_blame,
         ])
         .build(tauri::generate_context!())
         .expect("error while running Baton")

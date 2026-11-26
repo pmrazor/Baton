@@ -58,6 +58,18 @@ export interface FileContent {
   mtime: number;
 }
 
+export interface BlameHunk {
+  /** 1-based first line. */
+  startLine: number;
+  lineCount: number;
+  hash: string;
+  author: string;
+  /** Unix seconds. */
+  authorTime: number;
+  summary: string;
+  isUncommitted: boolean;
+}
+
 export interface GitDiffTexts {
   original: string | null;
   modified: string | null;
@@ -306,6 +318,7 @@ export const api = {
   gitRefsStamp: (root: string) => invoke<string>("git_refs_stamp", { root }),
   gitDiffTexts: (root: string, path: string, staged: boolean) =>
     invoke<GitDiffTexts>("git_diff_texts", { root, path, staged }),
+  gitBlame: (root: string, path: string) => invoke<BlameHunk[]>("git_blame", { root, path }),
 };
 
 /** Terminal output (UTF-8 text) and shell exits, for every terminal. `gone`:

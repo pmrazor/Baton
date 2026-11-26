@@ -110,7 +110,7 @@ fn read_worktree_file(canon_root: &Path, segments: &[String]) -> Result<BlobCont
 }
 
 /// Compute the `/`-separated path relative to `canon_repo` for `segments` inside `canon_root`.
-fn repo_relative_path(canon_repo: &Path, canon_root: &Path, segments: &[String]) -> Result<String, FsError> {
+pub(crate) fn repo_relative_path(canon_repo: &Path, canon_root: &Path, segments: &[String]) -> Result<String, FsError> {
     let prefix = canon_root
         .strip_prefix(canon_repo)
         .map_err(|_| FsError::invalid_path("작업 폴더가 git 저장소 안에 있지 않아요."))?;

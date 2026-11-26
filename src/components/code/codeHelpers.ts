@@ -716,7 +716,8 @@ export type EditorMenuActionId =
   | "copy"
   | "paste"
   | "selectAll"
-  | "copyPathLine";
+  | "copyPathLine"
+  | "toggleBlame";
 
 export interface EditorMenuItem {
   id: EditorMenuActionId;
@@ -737,8 +738,10 @@ export function buildEditorMenuSections(opts: {
   hasLineContent: boolean;
   readOnly: boolean;
   platform: Platform;
+  /** Current blame toggle state; omit to hide the item (diff editors). */
+  blameOn?: boolean;
 }): EditorMenuSection[] {
-  const { hasSelection, hasLineContent, readOnly, platform } = opts;
+  const { hasSelection, hasLineContent, readOnly, platform, blameOn } = opts;
   const mod = platform === "mac" ? "⌘" : "Ctrl+";
 
   return [
@@ -767,7 +770,18 @@ export function buildEditorMenuSections(opts: {
     },
     {
       id: "reference",
-      items: [{ id: "copyPathLine", label: "경로와 줄 복사" }],
+      items: [
+        { id: "copyPathLine", label: "경로와 줄 복사" },
+        ...(blameOn === undefined
+          ? []
+          : [
+              {
+                id: "toggleBlame" as const,
+                label: blameOn ? "Blame 숨기기" : "Blame 보기",
+                shortcut: platform === "mac" ? "⌘⇧B" : "Ctrl+Shift+B",
+              },
+            ]),
+      ],
     },
   ];
 }

@@ -33,12 +33,17 @@ import { closeBrackets, closeBracketsKeymap } from "@codemirror/autocomplete";
 import { tags } from "@lezer/highlight";
 import { languageForPath, type LanguageId } from "./codeHelpers";
 import { onTabClosed, onTabRenamed } from "./editorStore";
+import { gitChangeGutter, setGitBase } from "./gitGutter";
+import { applyBlameHunks, blameExtension, blameStamp, configureBlame } from "./blameGutter";
+
+export { applyBlameHunks, blameStamp, configureBlame };
 
 export interface EngineCallbacks {
   onDirtyChange: (key: string, dirty: boolean) => void;
   onSave: (key: string) => void;
   onAddToChat?: (key: string, view: EditorView) => void;
   onContextMenu?: (key: string, view: EditorView, x: number, y: number) => void;
+  onGitMarkerClick?: (key: string, line: number) => void;
 }
 
 export interface EditorSelectionInfo {
@@ -343,7 +348,14 @@ export function lineSeparatorOf(text: string): string {
 
 function baseExtensions(langCompartment: Compartment, lineSepCompartment: Compartment, sep: string): Extension[] {
   return [
+    blameExtension(),
     lineNumbers(),
+    gitChangeGutter({
+      onMarkerClick: (view, line) => {
+        const meta = viewMeta.get(view);
+        if (meta) meta.callbacks.onGitMarkerClick?.(meta.key, line);
+      },
+    }),
     highlightActiveLineGutter(),
     highlightSpecialChars(),
     history(),
@@ -560,6 +572,20 @@ export function markSessionSaved(key: string, view: EditorView | null): void {
     session.state = view.state;
   }
   session.savedDoc = session.state.doc;
+}
+
+/** Update the git base text stored in a tab's editor state for gutter change markers. */
+export function setSessionGitBase(key: string, base: string | null, view: EditorView | null): void {
+  const session = sessions.get(key);
+  if (!session) return;
+  const effect = setGitBase.of(base);
+  const targetView = view && viewMeta.get(view)?.key === key ? view : (activeViews.get(key) ?? null);
+  if (targetView && viewMeta.get(targetView)?.key === key) {
+    targetView.dispatch({ effects: effect });
+    session.state = targetView.state;
+  } else {
+    session.state = session.state.update({ effects: effect }).state;
+  }
 }
 
 /** Replace a tab's buffer with fresh text from disk while preserving cursor and scroll. */

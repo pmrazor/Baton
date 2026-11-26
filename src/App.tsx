@@ -13,6 +13,7 @@ import {
   type Attachment,
   type Launch,
   type Session,
+  type TaskInfo,
 } from "./types";
 import { HANDOFF_BRIEF_LABEL, handoffMemo, isLimitError } from "./handoff";
 import Sidebar from "./components/Sidebar";
@@ -41,6 +42,17 @@ import GitPanel from "./components/git/GitPanel";
 import SearchPanel from "./components/search/SearchPanel";
 import CodeEditor from "./components/code/CodeEditor";
 import { openCommitDiff, openDiff, openFile } from "./components/code/editorStore";
+import {
+  LEAD_LIMIT_NOTICE,
+  noticeTitle,
+  notifier,
+  permissionNotice,
+  reassignNotice,
+  taskTransitionNotice,
+  trackFocus,
+  turnNotice,
+  type TurnOutcome,
+} from "./notify";
 
 // Per-user conveniences only; losing them just resets the sidebar.
 const STORE = {
@@ -115,6 +127,17 @@ function homeOf(s: Session, sessions: Session[]): string | null {
   return sessions.find((l) => l.key === s.parent!.key)?.cwd ?? null;
 }
 
+/** A notification's title for a conversation: its title, or its agent's name. */
+function titleOf(state: State, key: string, agentId: string): string {
+  const s = state.sessions.find((x) => x.key === key);
+  return noticeTitle(s?.title, state.agents.find((a) => a.id === agentId)?.name ?? agentId);
+}
+
+function findTask(state: State, task: TaskInfo): TaskInfo | undefined {
+  const leadKey = sessionKey(task.leadAgentId, task.leadSessionId);
+  return state.sessions.find((s) => s.key === leadKey)?.tasks?.find((t) => t.id === task.id);
+}
+
 function read<T>(key: string, fallback: T): T {
   try {
     const raw = localStorage.getItem(key);
@@ -174,6 +197,15 @@ export default function App() {
   const creating = useRef(false);
   const attaching = useRef<string | null>(null);
   const saved = useRef(new Map<string, Session>());
+  // Event handlers outlive renders; they read the latest state from here (for notifications).
+  const stateRef = useRef(state);
+  stateRef.current = state;
+  // Last seen version of each task, so a status change notifies once.
+  const seenTasks = useRef(new Map<string, TaskInfo>());
+  // Conversations whose running turn the user stopped: no "중단됐어요" notification for those.
+  const cancelledByUser = useRef(new Set<string>());
+
+  useEffect(() => trackFocus(), []);
 
   useEffect(() => {
     api.listAgents().then((agents) => dispatch({ type: "agents", agents }));
@@ -197,13 +229,25 @@ export default function App() {
       onUpdate: (agentId, profileId, sessionId, update) =>
         dispatch({ type: "update", agentId, profileId, sessionId, update }),
       onAuth: (agentId, profileId, status) => dispatch({ type: "auth", agentId, profileId, status }),
-      onPermission: (request) => dispatch({ type: "permissionAdd", request }),
+      onPermission: (request) => {
+        dispatch({ type: "permissionAdd", request });
+        const key = sessionKey(request.agentId, request.sessionId);
+        notifier.notify("permission", titleOf(stateRef.current, key, request.agentId), permissionNotice(request));
+      },
       onStatus: (agentId, status, message) => {
         dispatch({ type: "agentStatus", agentId, status, message });
         api.listAgents().then((agents) => dispatch({ type: "agents", agents }));
       },
       onLog: (agentId, line) => dispatch({ type: "log", agentId, line }),
-      onTask: (task) => dispatch({ type: "taskUpdate", task }),
+      onTask: (task) => {
+        const prev = seenTasks.current.get(task.id) ?? findTask(stateRef.current, task);
+        seenTasks.current.set(task.id, task);
+        dispatch({ type: "taskUpdate", task });
+        const leadKey = sessionKey(task.leadAgentId, task.leadSessionId);
+        const title = titleOf(stateRef.current, leadKey, task.leadAgentId);
+        notifier.notify("task", title, taskTransitionNotice(prev, task));
+        notifier.notify("limit", title, reassignNotice(prev, task));
+      },
       onTaskSession: (event) => dispatch({ type: "taskSession", event }),
       onTaskBrief: (task, text, attachments) => dispatch({ type: "taskBrief", task, text, attachments }),
       onInboxDelivered: (agentId, sessionId, items) =>
@@ -566,7 +610,10 @@ export default function App() {
         }
         dispatch({ type: "userMessage", key, text: nextText, attachments: nextAttachments, briefLabel: nextBriefLabel });
         dispatch({ type: "busy", key, busy: true });
+        cancelledByUser.current.delete(key);
         const started = performance.now();
+        let outcome: TurnOutcome | null = null;
+        let leadLimited = false;
         try {
           const res = await api.sendPrompt(
             agentId,
@@ -584,14 +631,17 @@ export default function App() {
               cachedReadTokens: res.usage?.cachedReadTokens,
             },
           });
+          outcome = { stopReason: res.stopReason };
           if (res.stopReason === "cancelled") dispatch({ type: "notice", key, text: "중단됨", tone: "info" });
           else if (res.stopReason === "refusal") dispatch({ type: "notice", key, text: "에이전트가 요청을 거절했습니다", tone: "error" });
           else if (res.stopReason !== "end_turn") dispatch({ type: "notice", key, text: `종료: ${res.stopReason}`, tone: "info" });
         } catch (e) {
           const err = toHubError(e);
           dispatch({ type: "notice", key, text: err.message, tone: "error" });
+          outcome = { error: err.message };
           if (session.lead && isLimitError(err.message)) {
             dispatch({ type: "sessionLimited", key });
+            leadLimited = true;
           }
           if (err.authRequired) {
             dispatch({
@@ -602,6 +652,11 @@ export default function App() {
         } finally {
           dispatch({ type: "busy", key, busy: false });
         }
+        const userCancelled = cancelledByUser.current.delete(key);
+        const title = titleOf(stateRef.current, key, agentId);
+        // A lead's limit error gets the more useful limit notice instead of the raw error.
+        if (leadLimited) notifier.notify("limit", title, LEAD_LIMIT_NOTICE);
+        else if (outcome) notifier.notify("turn", title, turnNotice(outcome, { userCancelled }));
         // Drain anything queued while the agent was busy (including after cancel: "stop and send now").
         const taken = await api.inboxTake(agentId, sessionId).catch(() => []);
         if (taken.length === 0) break;
@@ -679,6 +734,7 @@ export default function App() {
       state.permissions
         .filter((p) => sessionKey(p.agentId, p.sessionId) === session.key)
         .forEach((p) => dispatch({ type: "permissionRemove", key: p.key }));
+      if (session.busy) cancelledByUser.current.add(session.key);
       await api.cancelPrompt(session.agentId, session.sessionId);
     },
     [state.permissions],
