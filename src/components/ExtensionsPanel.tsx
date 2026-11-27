@@ -22,6 +22,27 @@ import {
   reloadExtensions,
 } from "../extensions/registry";
 
+const KIND_LABELS: Record<string, string> = { languages: "언어", themes: "테마" };
+
+function KindBadges({ kinds }: { kinds: string[] }) {
+  return (
+    <>
+      {kinds
+        .filter((k) => KIND_LABELS[k])
+        .map((k) => (
+          <span key={k} className="ext-kind-badge small">
+            {KIND_LABELS[k]}
+          </span>
+        ))}
+    </>
+  );
+}
+
+function CreditLine({ author, license }: { author?: string; license?: string }) {
+  const text = [author, license].filter(Boolean).join(" · ");
+  return text ? <div className="muted small">{text}</div> : null;
+}
+
 function formatError(err: unknown): string {
   return toHubError(err).message;
 }
@@ -39,6 +60,7 @@ export default function ExtensionsPanel() {
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [themeHintId, setThemeHintId] = useState<string | null>(null);
   const [busyIds, setBusyIds] = useState<Record<string, "install" | "uninstall" | "toggle">>({});
 
   useEffect(() => {
@@ -121,8 +143,9 @@ export default function ExtensionsPanel() {
     setBusy(id, "install");
     try {
       const url = saveRegistryUrl(registryUrl);
-      await extApi.install(url, id);
+      const done = await extApi.install(url, id);
       await reloadExtensions();
+      setThemeHintId(Object.keys(done.manifest.contributes ?? {}).includes("themes") ? id : null);
     } catch (err) {
       setActionError(`확장을 설치하지 못했어요: ${formatError(err)}`);
     } finally {
@@ -228,10 +251,12 @@ export default function ExtensionsPanel() {
                         {manifest.publisher && (
                           <span className="muted small">· {manifest.publisher}</span>
                         )}
+                        <KindBadges kinds={Object.keys(manifest.contributes ?? {})} />
                       </div>
                       {manifest.description && (
                         <div className="muted small">{manifest.description}</div>
                       )}
+                      <CreditLine author={manifest.author} license={manifest.license} />
                     </div>
                     <div className="install-actions">
                       {canUpdate && regEntry && (
@@ -300,9 +325,14 @@ export default function ExtensionsPanel() {
                     {entry.publisher && (
                       <span className="muted small">· {entry.publisher}</span>
                     )}
+                    <KindBadges kinds={entry.kinds} />
                   </div>
                   {entry.description && (
                     <div className="muted small">{entry.description}</div>
+                  )}
+                  <CreditLine author={entry.author} license={entry.license} />
+                  {themeHintId === entry.id && inst && (
+                    <div className="small">설정 → 화면에서 고를 수 있어요</div>
                   )}
                 </div>
                 <div className="install-actions">

@@ -3,6 +3,7 @@ import { Plus, X } from "lucide-react";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { Terminal, type ITheme } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { getActiveTheme, getEffectiveScheme, onThemeChanged, safeTerminalColors } from "../extensions/themes";
 import "@xterm/xterm/css/xterm.css";
 import { api, subscribeTerminals } from "../api";
 import ContextMenu from "./ContextMenu";
@@ -120,7 +121,7 @@ function listen() {
 function theme(): ITheme {
   const css = getComputedStyle(document.documentElement);
   const v = (name: string) => css.getPropertyValue(name).trim();
-  const dark = matchMedia("(prefers-color-scheme: dark)").matches;
+  const dark = getEffectiveScheme() === "dark";
   const accent = v("--accent");
   return {
     background: v("--bg"),
@@ -145,13 +146,23 @@ function theme(): ITheme {
     brightMagenta: v("--brand"),
     cyan: dark ? "#4cc2c9" : "#1b8a9b",
     brightCyan: dark ? "#4cc2c9" : "#1b8a9b",
+    ...themeTerminal(),
   };
 }
 
-matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
+function themeTerminal(): ITheme {
+  const c = safeTerminalColors(getActiveTheme()?.theme);
+  const { selection, ...rest } = c;
+  return selection ? { ...rest, selectionBackground: selection } : rest;
+}
+
+function refreshTheme() {
+  // The theme's <style> may land a frame after the event; computed styles are current by now.
   const t = theme();
   entries.forEach((e) => (e.term.options.theme = t));
-});
+}
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", refreshTheme);
+onThemeChanged(refreshTheme);
 
 function send(e: Entry, data: string) {
   e.queue += data;

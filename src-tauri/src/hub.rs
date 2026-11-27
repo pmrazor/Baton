@@ -803,6 +803,11 @@ impl Hub {
         }
     }
 
+    /// A permission prompt for this session is waiting for the user.
+    pub fn has_pending_permission(&self, agent_id: &str, session_id: &str) -> bool {
+        self.permissions.lock().unwrap().values().any(|p| p.agent_id == agent_id && p.session_id == session_id)
+    }
+
     fn register_permission(&self, agent_id: &str, session_id: &str, runtime_key: &str) -> (String, oneshot::Receiver<Value>) {
         let key = format!("perm-{}", self.next_permission.fetch_add(1, Ordering::Relaxed));
         let (reply, rx) = oneshot::channel();

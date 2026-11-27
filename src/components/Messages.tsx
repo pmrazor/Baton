@@ -118,7 +118,7 @@ export function ChatItemView({
   switch (item.kind) {
     case "user":
       return (
-        <div className="msg-user-wrap">
+        <div className="msg-user-wrap" data-item-id={item.id}>
           {item.tag && <div className="msg-user-tag">{item.tag}</div>}
           {item.text && <div className="msg-user">{item.text}</div>}
           {item.attachments && item.attachments.length > 0 && (
@@ -135,7 +135,7 @@ export function ChatItemView({
       );
     case "assistant":
       return (
-        <div className="msg-assistant">
+        <div className="msg-assistant" data-item-id={item.id}>
           <Md text={item.text} />
           <div className={`msg-actions ${isLast ? "always" : ""}`}>
             <CopyButton text={item.text} />
@@ -163,7 +163,7 @@ export function ChatItemView({
       return <CompactionMarker item={item} />;
     case "brief":
       return (
-        <div className="brief">
+        <div className="brief" data-item-id={item.id}>
           <div className="brief-head">
             <Workflow size={14} />
             {item.label}

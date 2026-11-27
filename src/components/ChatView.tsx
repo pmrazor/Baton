@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { ArrowDown, Download, FolderPlus } from "lucide-react";
 import { api } from "../api";
+import { consumePendingReveal, getPendingReveal, onRevealMessage } from "../chatNav";
 import { accountLimit, leadLimit } from "../handoff";
 import type { State } from "../store";
 import {
@@ -21,6 +22,7 @@ import GuideBanner from "./GuideBanner";
 import { ChatRootContext, ToolRow } from "./Messages";
 import { groupTurns, TurnView } from "./Turn";
 import PermissionCard from "./PermissionCard";
+import CommandCenter from "./CommandCenter";
 import { baseName } from "./Sidebar";
 import { fmtReset } from "./UsagePanel";
 
@@ -115,6 +117,7 @@ export function TitleBar({ state, session, className = "", onOpenSession }: BarP
       {session?.lead && <span className="pill brand">에이전트 모드</span>}
       {agentName && <span className="pill">{agentName}</span>}
       {cwd && <span className="pill subtle">{baseName(cwd)}</span>}
+      <CommandCenter state={state} session={session} onOpenSession={onOpenSession} />
     </header>
   );
 }
@@ -280,6 +283,7 @@ export function ConversationView(p: ChatViewProps & { agentName: (id: string) =>
 
   // Scrolled up away from the end: offer a button back down.
   const [awayFromBottom, setAwayFromBottom] = useState(false);
+  const [revealTarget, setRevealTarget] = useState<{ itemId: string; seq: number } | null>(null);
   const jumpToBottom = () => {
     const el = listRef.current;
     if (!el) return;
@@ -288,12 +292,80 @@ export function ConversationView(p: ChatViewProps & { agentName: (id: string) =>
     el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
   };
 
-  // Opening a chat (or coming back from another tab) shows its end.
+  // Opening a chat (or coming back from another tab) shows its end, unless a message reveal is pending for it.
   useLayoutEffect(() => {
+    const pending = getPendingReveal();
+    if (pending && session?.key && pending.sessionKey === session.key) {
+      stickToBottom.current = false;
+      setRevealTarget({ itemId: pending.itemId, seq: pending.seq });
+      return;
+    }
+    setRevealTarget(null);
     stickToBottom.current = true;
     setAwayFromBottom(false);
     pinToBottom();
   }, [session?.key]);
+
+  // Listen for reveal requests targeting the currently rendered session.
+  useEffect(() => {
+    return onRevealMessage((req) => {
+      if (!session?.key || req.sessionKey !== session.key) return;
+      stickToBottom.current = false;
+      setRevealTarget({ itemId: req.itemId, seq: req.seq });
+    });
+  }, [session?.key]);
+
+  // Scroll to and flash the revealed message, retrying across frames up to ~1s while the view/group renders.
+  useEffect(() => {
+    if (!revealTarget || !session?.key) return;
+    let rafId = 0;
+    let flashTimer: number | null = null;
+    let flashedEl: HTMLElement | null = null;
+    const deadline = performance.now() + 1000;
+
+    const findTarget = (): HTMLElement | null => {
+      const root = threadRef.current;
+      if (!root) return null;
+      for (const el of root.querySelectorAll<HTMLElement>("[data-item-id]")) {
+        if (el.dataset.itemId === revealTarget.itemId) return el;
+      }
+      return null;
+    };
+
+    const attempt = () => {
+      const el = findTarget();
+      if (el) {
+        consumePendingReveal(revealTarget.seq);
+        stickToBottom.current = false;
+        el.scrollIntoView({ block: "center" });
+        const scroller = listRef.current;
+        if (scroller) {
+          setAwayFromBottom(!isNearBottom(scroller.scrollTop, scroller.scrollHeight, scroller.clientHeight));
+        }
+        el.classList.remove("flash");
+        void el.offsetWidth;
+        el.classList.add("flash");
+        flashedEl = el;
+        flashTimer = window.setTimeout(() => {
+          el.classList.remove("flash");
+          if (flashedEl === el) flashedEl = null;
+        }, 1600);
+        return;
+      }
+      if (performance.now() < deadline) {
+        rafId = requestAnimationFrame(attempt);
+      } else {
+        consumePendingReveal(revealTarget.seq);
+      }
+    };
+
+    rafId = requestAnimationFrame(attempt);
+    return () => {
+      if (rafId) cancelAnimationFrame(rafId);
+      if (flashTimer !== null) window.clearTimeout(flashTimer);
+      flashedEl?.classList.remove("flash");
+    };
+  }, [revealTarget, session?.key]);
 
   useEffect(pinToBottom, [items, permissions.length]);
 
@@ -340,6 +412,7 @@ export function ConversationView(p: ChatViewProps & { agentName: (id: string) =>
                 onDiscard={(id) => session && p.onDiscardTask(session, id)}
                 onOpenTaskDiff={(hash, path) => session && p.onOpenTaskDiff?.(session.cwd, hash, path)}
                 leadBusy={busy}
+                revealItemId={revealTarget?.itemId ?? null}
               />
             ))
           )}

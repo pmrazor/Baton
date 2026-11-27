@@ -321,6 +321,8 @@ export interface TaskInfo {
   limitHit: boolean;
   /** Cumulative token usage across all turns the task ran; absent when unreported. */
   usage?: TaskUsage | null;
+  /** Since when (ms) a running task has been silent; set once it looks stalled. */
+  stalledSince?: number | null;
   /** The lead's user message (turn) this task was created in. */
   turnId?: string;
 }

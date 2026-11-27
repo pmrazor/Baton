@@ -9,6 +9,8 @@ import {
   memberNameMap,
   mergeLine,
   mergeProgress,
+  stalledLine,
+  stalledMinutes,
   taskLabel,
   taskStatusBadge,
   taskSubLine,
@@ -330,5 +332,22 @@ describe("formatTokens and formatTaskUsage", () => {
       label: "토큰 읽음 365k (캐시 95%) · 출력 18k",
       title: "새로 읽음 18 · 캐시에서 읽음 345,000 · 캐시에 저장 20,000 · 출력 18,000",
     });
+  });
+});
+
+describe("stalledLine", () => {
+  it("warns with whole minutes for a flagged running task", () => {
+    const t = makeTask({ status: "running", stalledSince: 1_000 });
+    expect(stalledLine(t, 1_000 + 5 * 60_000 + 20_000)).toBe("멈춘 것 같아요 · 5분째 응답이 없어요");
+  });
+
+  it("is silent when not flagged or not running", () => {
+    expect(stalledLine(makeTask({ status: "running" }), 1e9)).toBeNull();
+    expect(stalledLine(makeTask({ status: "running", stalledSince: null }), 1e9)).toBeNull();
+    expect(stalledLine(makeTask({ status: "done", stalledSince: 1 }), 1e9)).toBeNull();
+  });
+
+  it("never shows less than a minute", () => {
+    expect(stalledMinutes(1_000, 1_500)).toBe(1);
   });
 });

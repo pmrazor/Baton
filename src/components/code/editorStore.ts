@@ -74,6 +74,7 @@ const subscribers = new Set<() => void>();
 const closeListeners = new Set<(root: string, id: string) => void>();
 const renameListeners = new Set<(root: string, fromId: string, toId: string) => void>();
 const revealListeners = new Set<(root: string, path: string) => void>();
+const blameToggleListeners = new Set<() => void>();
 let jumpSeq = 0;
 let revealSeq = 0;
 
@@ -130,6 +131,28 @@ export function onRevealInTree(fn: (root: string, path: string) => void): () => 
   return () => {
     revealListeners.delete(fn);
   };
+}
+
+/** Register a callback invoked when a command asks to toggle the editor blame gutter. */
+export function onToggleBlame(fn: () => void): () => void {
+  blameToggleListeners.add(fn);
+  return () => {
+    blameToggleListeners.delete(fn);
+  };
+}
+
+/** Toggle the editor blame gutter, falling back to localStorage when CodeEditor is unmounted. */
+export function requestToggleBlame(): void {
+  if (blameToggleListeners.size > 0) {
+    blameToggleListeners.forEach((fn) => fn());
+    return;
+  }
+  try {
+    const cur = localStorage.getItem("baton.blame") === "1";
+    localStorage.setItem("baton.blame", cur ? "0" : "1");
+  } catch {
+    // Storage unavailable.
+  }
 }
 
 /** Record a workspace root so `openAbsolutePath` can match files inside it. */
@@ -452,6 +475,7 @@ export function resetEditorStore(): void {
   closeListeners.clear();
   renameListeners.clear();
   revealListeners.clear();
+  blameToggleListeners.clear();
   jumpSeq = 0;
   revealSeq = 0;
 }

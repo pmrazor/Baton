@@ -8,6 +8,7 @@ import {
   permissionNotice,
   reassignNotice,
   summarize,
+  taskStalledNotice,
   taskTransitionNotice,
   truncate,
   turnNotice,
@@ -206,5 +207,18 @@ describe("coalescing", () => {
     notifier.notify("turn", "A", null);
     vi.advanceTimersByTime(2000);
     expect(send).not.toHaveBeenCalled();
+  });
+});
+
+describe("taskStalledNotice", () => {
+  it("fires once when a running task becomes stalled", () => {
+    const stalled = task({ status: "running", stalledSince: 5 });
+    expect(taskStalledNotice(task({ status: "running" }), stalled)).toBe("코덱스 · 로그인 화면 고치기: 응답이 없어요");
+    expect(taskStalledNotice(stalled, { ...stalled })).toBeNull();
+  });
+
+  it("ignores tasks that are not stalled or not running", () => {
+    expect(taskStalledNotice(undefined, task({ status: "running" }))).toBeNull();
+    expect(taskStalledNotice(undefined, task({ status: "failed", stalledSince: 5 }))).toBeNull();
   });
 });

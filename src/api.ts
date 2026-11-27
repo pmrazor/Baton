@@ -271,6 +271,8 @@ export const api = {
   saveAttachment: (workspace: string, name: string, data: string) =>
     invoke<string>("save_attachment", { workspace, name, data }),
   cancelPrompt: (agentId: string, sessionId: string) => invoke<void>("cancel_prompt", { agentId, sessionId }),
+  /** Move a stalled running task to another team member (`memberId` or the automatic pick). */
+  reassignTask: (taskId: string, memberId?: string) => invoke<void>("reassign_task", { taskId, memberId: memberId ?? null }),
   respondPermission: (key: string, optionId: string | null) => invoke<void>("respond_permission", { key, optionId }),
   setConfigOption: (agentId: string, sessionId: string, configId: string, value: unknown) =>
     invoke<{ configOptions?: ConfigOption[] }>("set_config_option", { agentId, sessionId, configId, value }),
@@ -304,6 +306,7 @@ export const api = {
   fsTrash: (root: string, path: string) => invoke<void>("fs_trash", { root, path }),
   searchText: (root: string, query: string, opts: SearchOptions) =>
     invoke<SearchResult>("search_text", { root, query, opts }),
+  listFiles: (root: string, limit?: number) => invoke<string[]>("list_files", { root, limit }),
   /** Git commands take any folder inside the repository; `paths` are repository-relative. */
   gitStatus: (root: string) => invoke<GitStatus>("git_status", { root }),
   gitStage: (root: string, paths: string[]) => invoke<void>("git_stage", { root, paths }),

@@ -1,0 +1,78 @@
+{
+  "id": "theme-dracula",
+  "name": "Dracula",
+  "version": "1.0.0",
+  "description": "Dracula dark color theme",
+  "publisher": "baton",
+  "license": "MIT",
+  "author": "Dracula Theme",
+  "homepage": "https://draculatheme.com",
+  "contributes": {
+    "themes": [
+      {
+        "id": "dracula",
+        "name": "Dracula",
+        "type": "dark",
+        "colors": {
+          "bg": "#282a36",
+          "sidebar": "#21222c",
+          "surface": "#282a36",
+          "surface-2": "#343746",
+          "surface-3": "#424450",
+          "hover": "rgb(248 248 242 / 6%)",
+          "border": "#44475a",
+          "text": "#f8f8f2",
+          "text-2": "#cfcfcc",
+          "muted": "#6272a4",
+          "accent": "#8be9fd",
+          "accent-soft": "rgb(139 233 253 / 14%)",
+          "on-accent": "#282a36",
+          "brand": "#bd93f9",
+          "brand-soft": "rgb(189 147 249 / 15%)",
+          "danger": "#ff5555",
+          "danger-soft": "rgb(255 85 85 / 14%)",
+          "ok": "#50fa7b",
+          "warn": "#ffb86c",
+          "add-bg": "rgb(80 250 123 / 14%)",
+          "del-bg": "rgb(255 85 85 / 14%)",
+          "code-bg": "#21222c"
+        },
+        "syntax": {
+          "keyword": "#ff79c6",
+          "string": "#f1fa8c",
+          "comment": "#6272a4",
+          "number": "#ffb86c",
+          "type": "#8be9fd",
+          "func": "#50fa7b",
+          "var": "#f8f8f2",
+          "prop": "#8be9fd",
+          "op": "#ff79c6",
+          "tag": "#ff5555",
+          "heading": "#bd93f9"
+        },
+        "terminal": {
+          "background": "#282a36",
+          "foreground": "#f8f8f2",
+          "cursor": "#f8f8f2",
+          "selection": "#44475a",
+          "black": "#21222c",
+          "red": "#ff5555",
+          "green": "#50fa7b",
+          "yellow": "#f1fa8c",
+          "blue": "#bd93f9",
+          "magenta": "#ff79c6",
+          "cyan": "#8be9fd",
+          "white": "#f8f8f2",
+          "brightBlack": "#6272a4",
+          "brightRed": "#ff6e6e",
+          "brightGreen": "#69ff94",
+          "brightYellow": "#ffffa5",
+          "brightBlue": "#d6acff",
+          "brightMagenta": "#ff92df",
+          "brightCyan": "#a4ffff",
+          "brightWhite": "#ffffff"
+        }
+      }
+    ]
+  }
+}

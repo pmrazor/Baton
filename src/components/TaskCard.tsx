@@ -9,6 +9,7 @@ import {
   formatReassigned,
   formatTaskUsage,
   memberNameMap,
+  stalledLine,
   taskStatusBadge,
   taskSubLine,
   TeamsContext,
@@ -57,6 +58,18 @@ export default function TaskCard({
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
   }, [live]);
+  // "더 기다리기" hides a task's stall warning until its stalledSince changes.
+  const [waited, setWaited] = useState<Record<string, number>>({});
+  const [moveBusy, setMoveBusy] = useState<string | null>(null);
+  const [moveError, setMoveError] = useState<Record<string, string>>({});
+  const moveTask = (id: string) => {
+    setMoveBusy(id);
+    setMoveError(({ [id]: _drop, ...rest }) => rest);
+    api
+      .reassignTask(id)
+      .catch((e) => setMoveError((m) => ({ ...m, [id]: toHubError(e).message })))
+      .finally(() => setMoveBusy(null));
+  };
 
   const done = tasks.filter((t) => t.status === "done").length;
   return (
@@ -78,6 +91,7 @@ export default function TaskCard({
         const sub = taskSubLine(t, leadBusy);
         const reassignedLine = formatReassigned(t.reassigned, memberNames);
         const usageLine = formatTaskUsage(t.usage);
+        const stalled = asks.length === 0 && waited[t.id] !== t.stalledSince ? stalledLine(t, now) : null;
         return (
           <div key={t.id} className="task-block">
             <button className="task" disabled={!key} onClick={() => key && onOpen(key)}>
@@ -114,6 +128,21 @@ export default function TaskCard({
             )}
             {canReviewChanges(t) && (
               <TaskReview task={t} leadBusy={leadBusy} onMerge={onMerge} onDiscard={onDiscard} onOpenDiff={onOpenDiff} />
+            )}
+            {stalled && (
+              <div className="task-perm task-stalled" role="alert">
+                <span className="grow">{stalled}</span>
+                <button className="btn btn-primary small-btn" disabled={moveBusy === t.id} onClick={() => moveTask(t.id)}>
+                  다른 팀원에게 넘기기
+                </button>
+                <button
+                  className="btn small-btn"
+                  onClick={() => setWaited((w) => ({ ...w, [t.id]: t.stalledSince ?? 0 }))}
+                >
+                  더 기다리기
+                </button>
+                {moveError[t.id] && <span className="task-stalled-error">{moveError[t.id]}</span>}
+              </div>
             )}
             {asks.map((p) => (
               <div key={p.key} className="task-perm">

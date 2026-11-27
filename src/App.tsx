@@ -35,21 +35,25 @@ import UpdateBanner from "./components/UpdateBanner";
 import WindowControls from "./components/WindowControls";
 import { findUpdate } from "./update";
 import "./extensions/languages";
+import "./extensions/themes";
 import { loadInstalledExtensions } from "./extensions/registry";
-import { onOpenRequest } from "./codeNav";
+import { onOpenRequest, requestToggleProView } from "./codeNav";
+import { registerCommand } from "./commands/registry";
+import { detectPlatform } from "./platform";
 import type { Update } from "@tauri-apps/plugin-updater";
 import { quotasFromUsageReport } from "./usage";
 import FileTree from "./components/code/FileTree";
 import GitPanel from "./components/git/GitPanel";
 import SearchPanel from "./components/search/SearchPanel";
 import CodeEditor from "./components/code/CodeEditor";
-import { openCommitDiff, openDiff, openFile } from "./components/code/editorStore";
+import { openCommitDiff, openDiff, openFile, requestToggleBlame } from "./components/code/editorStore";
 import {
   LEAD_LIMIT_NOTICE,
   noticeTitle,
   notifier,
   permissionNotice,
   reassignNotice,
+  taskStalledNotice,
   taskTransitionNotice,
   trackFocus,
   turnNotice,
@@ -249,6 +253,7 @@ export default function App() {
         const leadKey = sessionKey(task.leadAgentId, task.leadSessionId);
         const title = titleOf(stateRef.current, leadKey, task.leadAgentId);
         notifier.notify("task", title, taskTransitionNotice(prev, task));
+        notifier.notify("task", title, taskStalledNotice(prev, task));
         notifier.notify("limit", title, reassignNotice(prev, task));
       },
       onTaskSession: (event) => dispatch({ type: "taskSession", event }),
@@ -727,7 +732,10 @@ export default function App() {
 
   const openSession = useCallback(
     (key: string) => {
-      if (state.sessions.some((s) => s.key === key)) dispatch({ type: "activate", key });
+      if (state.sessions.some((s) => s.key === key)) {
+        dispatch({ type: "activate", key });
+        setTab("chat");
+      }
     },
     [state.sessions],
   );
@@ -837,6 +845,213 @@ export default function App() {
 
   // The chat's own folder: a task's chat shows its worktree, like the terminal does.
   const codeRoot = active?.cwd ?? state.workspace;
+
+  // Register app-level commands for the command palette (`>`).
+  useEffect(() => {
+    const isMac = detectPlatform(typeof navigator !== "undefined" ? navigator.userAgent : "") === "mac";
+    const isAgentMode = active && !active.draft ? !!active.lead : agentMode;
+    const started = !!active && !active.draft;
+    const toggleProView = (id: "files" | "search" | "git") => {
+      if (uiMode !== "pro") changeUiMode("pro");
+      requestToggleProView(id);
+    };
+
+    const disposers = [
+      registerCommand({
+        id: "chat.new",
+        title: "새 대화",
+        category: "대화",
+        keywords: ["new", "chat", "conversation"],
+        run: () => void newChat(),
+      }),
+      registerCommand({
+        id: "mode.agent",
+        title: "에이전트 모드로 전환",
+        category: "모드",
+        keywords: ["agent", "lead", "orchestra"],
+        when: () => !isAgentMode && !active?.parent,
+        run: () => changeMode({ lead: true }),
+      }),
+      registerCommand({
+        id: "mode.chat",
+        title: "채팅 모드로 전환",
+        category: "모드",
+        keywords: ["chat", "normal"],
+        when: () => isAgentMode && !active?.parent,
+        run: () => changeMode({ lead: false }),
+      }),
+      registerCommand({
+        id: "ui.pro",
+        title: "프로 모드로 전환",
+        category: "화면",
+        keywords: ["pro", "layout", "ide"],
+        when: () => uiMode !== "pro",
+        run: () => changeUiMode("pro"),
+      }),
+      registerCommand({
+        id: "ui.simple",
+        title: "심플 모드로 전환",
+        category: "화면",
+        keywords: ["simple", "layout"],
+        when: () => uiMode !== "simple",
+        run: () => changeUiMode("simple"),
+      }),
+      registerCommand({
+        id: "settings.open",
+        title: "설정 열기",
+        category: "설정",
+        keywords: ["settings", "preferences"],
+        run: () => setSettingsTab("accounts"),
+      }),
+      registerCommand({
+        id: "settings.accounts",
+        title: "계정 설정",
+        category: "설정",
+        keywords: ["accounts", "login", "profile"],
+        run: () => setSettingsTab("accounts"),
+      }),
+      registerCommand({
+        id: "settings.teams",
+        title: "팀 설정",
+        category: "설정",
+        keywords: ["teams", "roster"],
+        run: () => setSettingsTab("teams"),
+      }),
+      registerCommand({
+        id: "settings.agents",
+        title: "에이전트 설정",
+        category: "설정",
+        keywords: ["agents", "install", "cli"],
+        run: () => setSettingsTab("agents"),
+      }),
+      registerCommand({
+        id: "settings.notifications",
+        title: "알림 설정",
+        category: "설정",
+        keywords: ["notifications", "alert"],
+        run: () => setSettingsTab("notifications"),
+      }),
+      registerCommand({
+        id: "settings.extensions",
+        title: "확장 설정",
+        category: "설정",
+        keywords: ["extensions", "plugins", "languages"],
+        run: () => setSettingsTab("extensions"),
+      }),
+      registerCommand({
+        id: "settings.appearance",
+        title: "테마 고르기…",
+        category: "설정",
+        keywords: ["theme", "appearance", "color", "테마", "화면"],
+        run: () => setSettingsTab("appearance"),
+      }),
+      registerCommand({
+        id: "settings.mcp",
+        title: "MCP 설정",
+        category: "설정",
+        keywords: ["mcp", "servers", "tools"],
+        run: () => setSettingsTab("mcp"),
+      }),
+      registerCommand({
+        id: "settings.about",
+        title: "정보",
+        category: "설정",
+        keywords: ["about", "version", "licenses"],
+        run: () => setSettingsTab("about"),
+      }),
+      registerCommand({
+        id: "tab.chat",
+        title: "대화 탭으로 이동",
+        category: "탭",
+        keywords: ["chat", "tab"],
+        when: () => started || !!codeRoot,
+        run: () => setTab("chat"),
+      }),
+      registerCommand({
+        id: "tab.code",
+        title: "코드 탭으로 이동",
+        category: "탭",
+        keywords: ["code", "editor", "tab"],
+        when: () => !!codeRoot,
+        run: () => openCode(),
+      }),
+      registerCommand({
+        id: "tab.terminal",
+        title: "터미널 탭으로 이동",
+        category: "탭",
+        keywords: ["terminal", "shell", "tab"],
+        when: () => started || !!codeRoot,
+        run: () => setTab("terminal"),
+      }),
+      registerCommand({
+        id: "tab.activity",
+        title: "활동 탭으로 이동",
+        category: "탭",
+        keywords: ["activity", "tools", "tab"],
+        when: () => started,
+        run: () => setTab("activity"),
+      }),
+      registerCommand({
+        id: "tab.logs",
+        title: "로그 탭으로 이동",
+        category: "탭",
+        keywords: ["logs", "output", "tab"],
+        when: () => started,
+        run: () => setTab("logs"),
+      }),
+      registerCommand({
+        id: "view.files",
+        title: "파일 보기 토글",
+        category: "보기",
+        keywords: ["files", "explorer", "tree", "sidebar"],
+        run: () => toggleProView("files"),
+      }),
+      registerCommand({
+        id: "view.search",
+        title: "찾기 보기 토글",
+        category: "보기",
+        keywords: ["search", "find", "grep"],
+        shortcut: isMac ? "⌘⇧F" : "Ctrl+Shift+F",
+        run: () => toggleProView("search"),
+      }),
+      registerCommand({
+        id: "view.git",
+        title: "깃 보기 토글",
+        category: "보기",
+        keywords: ["git", "source control", "scm", "diff"],
+        run: () => toggleProView("git"),
+      }),
+      registerCommand({
+        id: "workspace.add",
+        title: "작업 폴더 추가",
+        category: "워크스페이스",
+        keywords: ["folder", "workspace", "open"],
+        run: () => void addWorkspace(),
+      }),
+      registerCommand({
+        id: "session.cancel",
+        title: "현재 응답 중단",
+        category: "대화",
+        keywords: ["stop", "cancel", "abort"],
+        when: () => !!active?.busy,
+        run: () => {
+          if (active) void cancel(active);
+        },
+      }),
+      registerCommand({
+        id: "editor.toggleBlame",
+        title: "Blame 보기 토글",
+        category: "편집기",
+        keywords: ["git blame", "blame", "gutter"],
+        when: () => !!codeRoot,
+        run: () => requestToggleBlame(),
+      }),
+    ];
+
+    return () => {
+      for (const dispose of disposers) dispose();
+    };
+  }, [active, agentMode, uiMode, codeRoot, newChat, changeMode, changeUiMode, openCode, addWorkspace, cancel]);
   const fileTree = codeRoot ? <FileTree key={codeRoot} root={codeRoot} onOpen={openCode} /> : null;
   const searchPanel = codeRoot ? (
     <SearchPanel

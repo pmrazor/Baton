@@ -24,6 +24,9 @@ const BINARY_SNIFF_BYTES: usize = 8 * 1024;
 /// Default cap on the number of matches returned.
 const DEFAULT_MAX_RESULTS: usize = 2000;
 
+/// Default cap on the number of files returned by `list_files`.
+const DEFAULT_MAX_FILES: usize = 20_000;
+
 /// Preview text is trimmed to about this many characters around the first match.
 const PREVIEW_CHARS: usize = 200;
 
@@ -327,6 +330,52 @@ pub async fn search_text(root: String, query: String, opts: SearchOptions) -> Re
     .map_err(|e| FsError::io(format!("작업 실행에 실패했어요: {e}")))?
 }
 
+/// Walk `root` with the same ignore/hidden rules as [`search`] and return `/`-separated relative file paths.
+pub(crate) fn list_files_in(root: &str, limit: Option<usize>) -> Result<Vec<String>, FsError> {
+    let canon = canonical_root(root)?;
+    let max = limit.filter(|&n| n > 0).unwrap_or(DEFAULT_MAX_FILES);
+
+    let mut walker = WalkBuilder::new(&canon);
+    walker
+        .hidden(true)
+        .git_ignore(true)
+        .git_exclude(true)
+        .ignore(true)
+        .require_git(false)
+        .follow_links(false)
+        .sort_by_file_name(|a, b| a.cmp(b));
+    walker.filter_entry(|entry| {
+        if entry.depth() > 0 && entry.file_type().is_some_and(|t| t.is_dir()) {
+            let name = entry.file_name().to_string_lossy();
+            if ALWAYS_SKIPPED.contains(&name.as_ref()) {
+                return false;
+            }
+        }
+        true
+    });
+
+    let mut files = Vec::new();
+    for entry in walker.build() {
+        let Ok(entry) = entry else { continue };
+        if !entry.file_type().is_some_and(|t| t.is_file()) {
+            continue;
+        }
+        let Ok(rel) = entry.path().strip_prefix(&canon) else { continue };
+        files.push(rel_string(rel));
+        if files.len() >= max {
+            break;
+        }
+    }
+    Ok(files)
+}
+
+#[tauri::command]
+pub async fn list_files(root: String, limit: Option<usize>) -> Result<Vec<String>, FsError> {
+    tokio::task::spawn_blocking(move || list_files_in(&root, limit))
+        .await
+        .map_err(|e| FsError::io(format!("작업 실행에 실패했어요: {e}")))?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -562,5 +611,39 @@ mod tests {
         assert_eq!(column, 4 + 12 + 2 + 1 + 1);
         let units: Vec<u16> = preview.encode_utf16().collect();
         assert_eq!(String::from_utf16(&units[ranges[0][0]..ranges[0][1]]).unwrap(), "needle");
+    }
+
+    #[test]
+    fn list_files_respects_gitignore_hidden_and_always_skipped() {
+        let dir = TempDir::new("list-ignore");
+        dir.write(".gitignore", "dist/\n*.log\n");
+        dir.write("README.md", "hi\n");
+        dir.write("src/main.rs", "fn main() {}\n");
+        dir.write("dist/bundle.js", "x\n");
+        dir.write("app.log", "x\n");
+        dir.write(".hidden/secret.txt", "x\n");
+        dir.write("node_modules/pkg/index.js", "x\n");
+        dir.write("target/debug/bin", "x\n");
+        dir.write(".baton/session.json", "x\n");
+
+        let files = list_files_in(&dir.root(), None).unwrap();
+        assert_eq!(files, ["README.md", "src/main.rs"]);
+    }
+
+    #[test]
+    fn list_files_respects_limit() {
+        let dir = TempDir::new("list-limit");
+        dir.write("a.txt", "1");
+        dir.write("b.txt", "2");
+        dir.write("c.txt", "3");
+
+        let files = list_files_in(&dir.root(), Some(2)).unwrap();
+        assert_eq!(files, ["a.txt", "b.txt"]);
+    }
+
+    #[test]
+    fn list_files_rejects_missing_root() {
+        let err = list_files_in("/definitely/not/here/baton", None).unwrap_err();
+        assert_eq!(err.kind, "not_found");
     }
 }

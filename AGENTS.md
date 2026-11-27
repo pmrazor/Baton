@@ -13,6 +13,8 @@ Backend `src-tauri/src/` (crate `baton_lib`; `main.rs` only calls into `lib.rs`)
   `generate_handler![…]` list (every new command must be registered there; module commands like `files::fs_read` too).
 - `hub.rs` — owns agent processes ("runtimes") and ACP sessions; turns agent traffic into events; usage/limits plumbing.
 - `acp.rs` — ACP JSON-RPC 2.0 transport over a child's stdin/stdout (requests, responses, agent-initiated calls).
+- `mcp.rs` — shared MCP servers (`mcp.json`) merged into every ACP session's `mcpServers`; connection check over stdio/http;
+  TOML parse for import.
 - `orchestra.rs` (largest) — agent mode: axum MCP server on 127.0.0.1 with per-lead bearer tokens; tools
   `list_agents, delegate, wait, get_result, send_followup, merge_task, discard_task, cancel`; task state machine,
   `run_turn` (one task turn), per-workspace write lock, inbox, limits, permission auto-handling for Baton tools.
@@ -23,10 +25,14 @@ Backend `src-tauri/src/` (crate `baton_lib`; `main.rs` only calls into `lib.rs`)
 - `profiles.rs` — named accounts per agent (own home dir via `profileEnv`); `login.rs` — terminal-based ACP auth.
 - `usage.rs` — plan limits read outside ACP (same `groups/buckets` shape for UI and `list_agents`).
 - `history.rs` — chat transcripts as JSON in `<workspace>/.baton/sessions/`; `legacy.rs` — migration from "Agent Hub".
+- `guide.rs` — project-guide presence + staleness signals from git; per-workspace mode in `.baton/settings.json`; note
+  injected into a lead's first prompt.
 - `attachments.rs` — attached files → ACP prompt content (image / embedded resource / resource_link).
+- `extensions.rs` — downloadable data-only extensions: registry fetch over https/local path, sha256-checked install into
+  app data, `state.json`.
 - `files.rs` — sandboxed workspace fs (list/read/atomic write/stat/rename/trash); defines `FsError`; rejects `..`/escaping symlinks.
 - `git.rs` — Source-control commands (status, stage, commit, branches, push/pull, log); `gitdiff.rs` — original/modified
-  texts for diff tabs; `gitblame.rs` — blame hunks for the editor gutter; `search.rs` — text search (`ignore` + `regex`).
+  texts for diff tabs; `gitblame.rs` — blame hunks for the editor gutter; `search.rs` — text search (`ignore` + `regex`) and `list_files`.
 - `terminal.rs` — PTY terminals (`terminal-output` / `terminal-exit` events); `shell_env.rs` — login-shell PATH for GUI launches.
 
 Frontend `src/`:
@@ -34,15 +40,23 @@ Frontend `src/`:
 - `store.ts` — the reducer (`reducer`, `initialState`, `Action`): sessions, messages, tasks, permissions, queues.
 - `api.ts` — ALL `invoke` wrappers (one function per command) and event subscriptions (`subscribe`, `subscribeTerminals`).
 - `types.ts` — shapes shared with Rust (keep in sync with serde structs, which use camelCase).
+- `extensions/` — downloadable data-only extensions: `api.ts` (contract), `registry.ts` (contribution kinds),
+  `languages.ts` (legacy/simple-mode grammars), `themes.ts` ("themes" kind: theme index, `isSafeColor`/`themeCssText`, applies the active theme as one `<style id="baton-theme">` + `baton.themeCache`, `onThemeChanged`), `catalog.ts` (registry cache/filtering).
+- `mcp/` — shared MCP servers UI: `api.ts` (invoke wrappers), `helpers.ts` (validation, JSON/TOML import, checks).
+- `commands/` — command center helpers: `registry.ts` (command registry + recent ordering), `fuzzy.ts` (fuzzy scoring/ranking), `conversationSearch.ts` (past conversation content search).
 - Small modules: `composerBus.ts` (attach/insert into composer), `notify.ts` (desktop notifications, coalescing queue),
   `concurrency.ts` (other conversations working in the same folder), `handoff.ts` (lead handoff memo), `usage.ts` (quota extraction per agent
-  family), `codeNav.ts`, `platform.ts`, `update.ts`; `styles.css` (tokens) and `scrollbars.css`.
+  family), `codeNav.ts`, `chatNav.ts`, `platform.ts`, `update.ts`; `styles.css` (tokens) and `scrollbars.css`.
 - `components/` — `ChatView`, `Composer`, `Messages`, `Turn`, `TaskCard`, `Sidebar`, `SettingsModal`, `TeamsPanel`,
-  `UsagePanel`, `TerminalView`, `ProLayout` (+`proLayoutState.ts`), `PermissionCard`, `ContextMenu`, `Popover`, banners…
+  `UsagePanel`, `ExtensionsPanel`, `AppearancePanel` (Settings → 화면 theme pickers), `McpPanel`, `NotificationsPanel`, `GuideBanner`, `TerminalView`, `ProLayout`
+  (+`proLayoutState.ts`), `PermissionCard`, `ContextMenu`, `Popover`, banners…
+  - `CommandCenter.tsx` — title-bar quick open (files + conversations), command palette (`>`), and go-to-line (`:`).
 - `components/code/` — CodeMirror 6 editor: `CodeEditor.tsx`, `FileTree.tsx`, `editorStore.ts` (open tabs per root),
-  `cmEngine.ts`/`cmDiffEngine.ts` (lazy-loaded), `codeHelpers.ts` (pure), `gitGutter.ts`, `blameGutter.ts`.
+  `cmEngine.ts`/`cmDiffEngine.ts` (lazy-loaded), `codeHelpers.ts` (pure), `ExtensionHintBar.tsx`, `gitGutter.ts`, `blameGutter.ts`.
 - `components/git/` — `GitPanel.tsx`, `gitHelpers.ts`, `gitGraph.ts` (commit graph lanes).
 - `components/search/` — `SearchPanel.tsx`, `searchStore.ts`, `searchHelpers.ts`.
+- `extensions/` — registry content: `index.json` + `<id>/extension.json` per extension (see `extensions/README.md`);
+  `lang-*` grammar and `theme-*` color-theme extensions. `scripts/build-extension-index.mjs` regenerates the index with sha256.
 
 ## How a request flows
 1. UI action → `api.ts` wrapper → `invoke("cmd", args)` → command in `lib.rs` (or `files::`/`git::`/… module) → hub/module logic.
@@ -61,6 +75,7 @@ New command checklist: Rust fn + register in `generate_handler!` → wrapper in 
   - `npx vitest run`
   - `npm run build`
   - `cd src-tauri && cargo test --locked && cargo clippy --locked` (one pre-existing `single_match` clippy warning is expected)
+- `npm run extensions:index` after editing `extensions/` (regenerates `extensions/index.json` with sha256).
 - `npm run licenses` after dependency changes (regenerates `src/assets/licenses.json`). CI runs typecheck, tests, build, `cargo test --locked`.
 
 ## Conventions

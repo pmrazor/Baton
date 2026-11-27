@@ -26,7 +26,10 @@ extensions/
 | `description` | Short English description. |
 | `publisher` | Publisher id, e.g. `baton`. |
 | `baton` | Optional minimum Baton version. |
-| `contributes` | Map of contribution kinds; `languages` today. |
+| `license` | SPDX id of the original work's license, e.g. `MIT`. |
+| `author` | Original author or project credited. |
+| `homepage` | Project page of the original work. |
+| `contributes` | Map of contribution kinds; `languages` and `themes`. |
 
 A language needs `id`, `name`, optional `extensions` (`.go`), `filenames`
 (`Dockerfile`), `comments` (`line`, `block`), `indentUnit`, and a `grammar`:
@@ -37,6 +40,27 @@ A language needs `id`, `name`, optional `extensions` (`.go`), `filenames`
 - `{ "simpleMode": "dotenv.json" }` — a JSON file in the extension folder in
   CodeMirror simple-mode form: `states.start` is required, regexes are strings,
   only the `i` flag is allowed.
+
+## Themes
+
+A theme extension contributes `contributes.themes`, an array of themes:
+
+| Field | Meaning |
+| --- | --- |
+| `id` | `[a-z0-9-]+`, unique within the extension, e.g. `mocha`. |
+| `name` | Display name, e.g. `Catppuccin Mocha`. |
+| `type` | `light` or `dark`; missing colors fall back to Baton's built-in theme of that type. |
+| `colors` | Required object; keys are `THEME_COLOR_KEYS` (`bg`, `surface`, `text`, `accent`, …) in `src/extensions/api.ts`. |
+| `syntax` | Optional `THEME_SYNTAX_KEYS` (`keyword`, `string`, `comment`, …). |
+| `terminal` | Optional `THEME_TERMINAL_KEYS`: the 16 ANSI colors plus `background`, `foreground`, `cursor`, `selection`. |
+
+Values must be `#rrggbb`, `#rrggbbaa` or `rgb(r g b / NN%)`
+(space-separated RGB, optional percentage alpha). Use `rgb(... / 6%)` for
+`hover` and `rgb(... / 14%)` for soft tokens such as `accent-soft`.
+
+Credit the palette's original project with the manifest's `license`, `author`
+and `homepage` fields; the index carries them, and theme keywords include
+`theme`, `light`/`dark` and the theme names. Use ids like `theme-<name>`.
 
 ## Adding a language extension
 

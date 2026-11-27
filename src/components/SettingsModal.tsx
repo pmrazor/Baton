@@ -6,6 +6,7 @@ import { api, toHubError } from "../api";
 import TeamsPanel from "./TeamsPanel";
 import AboutPanel from "./AboutPanel";
 import ExtensionsPanel from "./ExtensionsPanel";
+import AppearancePanel from "./AppearancePanel";
 import McpPanel from "./McpPanel";
 import NotificationsPanel from "./NotificationsPanel";
 import type { State } from "../store";
@@ -28,7 +29,7 @@ interface Props {
   onClose: () => void;
 }
 
-export type SettingsTab = "accounts" | "teams" | "agents" | "mcp" | "extensions" | "notifications" | "about";
+export type SettingsTab = "accounts" | "teams" | "agents" | "mcp" | "extensions" | "appearance" | "notifications" | "about";
 
 const SETTINGS_TABS: [SettingsTab, string][] = [
   ["accounts", "계정"],
@@ -36,6 +37,7 @@ const SETTINGS_TABS: [SettingsTab, string][] = [
   ["agents", "에이전트"],
   ["mcp", "MCP"],
   ["extensions", "확장"],
+  ["appearance", "화면"],
   ["notifications", "알림"],
   ["about", "정보"],
 ];
@@ -51,6 +53,10 @@ export default function SettingsModal({
   const [tab, setTab] = useState<SettingsTab>(initialTab ?? "accounts");
   const [configPath, setConfigPath] = useState("");
   const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    if (initialTab) setTab(initialTab);
+  }, [initialTab]);
 
   useEffect(() => {
     api.agentsConfigPath().then(setConfigPath);
@@ -86,6 +92,8 @@ export default function SettingsModal({
         {tab === "mcp" && <McpPanel />}
 
         {tab === "extensions" && <ExtensionsPanel />}
+
+        {tab === "appearance" && <AppearancePanel />}
 
         {tab === "notifications" && <NotificationsPanel />}
 

@@ -298,6 +298,177 @@
           "size": 525
         }
       ]
+    },
+    {
+      "id": "theme-catppuccin",
+      "name": "Catppuccin",
+      "version": "1.0.0",
+      "description": "Catppuccin color themes: Latte, Frappé, Macchiato and Mocha",
+      "publisher": "baton",
+      "license": "MIT",
+      "author": "Catppuccin",
+      "homepage": "https://catppuccin.com",
+      "kinds": [
+        "themes"
+      ],
+      "keywords": [
+        "theme",
+        "light",
+        "latte",
+        "Catppuccin Latte",
+        "dark",
+        "frappe",
+        "Catppuccin Frappé",
+        "macchiato",
+        "Catppuccin Macchiato",
+        "mocha",
+        "Catppuccin Mocha"
+      ],
+      "files": [
+        {
+          "path": "extension.json",
+          "sha256": "48042b186bc372b2ef4556dd3a02cd7c2fc361fcae04b6eec5da6c164d2814d8",
+          "size": 8163
+        }
+      ]
+    },
+    {
+      "id": "theme-dracula",
+      "name": "Dracula",
+      "version": "1.0.0",
+      "description": "Dracula dark color theme",
+      "publisher": "baton",
+      "license": "MIT",
+      "author": "Dracula Theme",
+      "homepage": "https://draculatheme.com",
+      "kinds": [
+        "themes"
+      ],
+      "keywords": [
+        "theme",
+        "dark",
+        "dracula",
+        "Dracula"
+      ],
+      "files": [
+        {
+          "path": "extension.json",
+          "sha256": "7662560aa19d9046f502ced14709ee8366691e2ccf0dcebd05424264de5327ab",
+          "size": 2226
+        }
+      ]
+    },
+    {
+      "id": "theme-gruvbox",
+      "name": "Gruvbox",
+      "version": "1.0.0",
+      "description": "Gruvbox dark and light color themes",
+      "publisher": "baton",
+      "license": "MIT",
+      "author": "Pavel Pertsev (morhetz/gruvbox)",
+      "homepage": "https://github.com/morhetz/gruvbox",
+      "kinds": [
+        "themes"
+      ],
+      "keywords": [
+        "theme",
+        "dark",
+        "Gruvbox Dark",
+        "light",
+        "Gruvbox Light"
+      ],
+      "files": [
+        {
+          "path": "extension.json",
+          "sha256": "402cbbf1a2aaef6df38b5884a1fdc407b5c7c12ff58bb6f9333d3e66ab2f8156",
+          "size": 4217
+        }
+      ]
+    },
+    {
+      "id": "theme-nord",
+      "name": "Nord",
+      "version": "1.0.0",
+      "description": "Nord dark color theme",
+      "publisher": "baton",
+      "license": "MIT",
+      "author": "Arctic Ice Studio",
+      "homepage": "https://www.nordtheme.com",
+      "kinds": [
+        "themes"
+      ],
+      "keywords": [
+        "theme",
+        "dark",
+        "nord",
+        "Nord"
+      ],
+      "files": [
+        {
+          "path": "extension.json",
+          "sha256": "dc73ca4768f9bac7b88bf9a37a650dbb6143fc27dcbef649fc22b3cd56f20333",
+          "size": 2219
+        }
+      ]
+    },
+    {
+      "id": "theme-one-dark",
+      "name": "One Dark",
+      "version": "1.0.0",
+      "description": "One Dark color theme",
+      "publisher": "baton",
+      "license": "MIT",
+      "author": "Atom",
+      "homepage": "https://github.com/atom/atom",
+      "kinds": [
+        "themes"
+      ],
+      "keywords": [
+        "theme",
+        "dark",
+        "one-dark",
+        "One Dark"
+      ],
+      "files": [
+        {
+          "path": "extension.json",
+          "sha256": "7526ebb66a9a1eb70e32fe36d72dbf36d9d62376e18de75546278cdf2b41b362",
+          "size": 2225
+        }
+      ]
+    },
+    {
+      "id": "theme-tokyo-night",
+      "name": "Tokyo Night",
+      "version": "1.0.0",
+      "description": "Tokyo Night color themes: Night, Storm, Moon and Day",
+      "publisher": "baton",
+      "license": "MIT",
+      "author": "Folke Lemaitre (tokyonight.nvim)",
+      "homepage": "https://github.com/folke/tokyonight.nvim",
+      "kinds": [
+        "themes"
+      ],
+      "keywords": [
+        "theme",
+        "dark",
+        "night",
+        "Tokyo Night",
+        "storm",
+        "Tokyo Night Storm",
+        "moon",
+        "Tokyo Night Moon",
+        "light",
+        "day",
+        "Tokyo Night Day"
+      ],
+      "files": [
+        {
+          "path": "extension.json",
+          "sha256": "806e1f42cc83b33efb25a9100561badaa9d65786530c4e188f072b200be4123a",
+          "size": 8180
+        }
+      ]
     }
   ]
 }

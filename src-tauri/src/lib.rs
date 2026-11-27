@@ -141,6 +141,12 @@ async fn send_prompt(
     hub.prompt(&agent_id, &session_id, &text, &attachments).await
 }
 
+/// Move a stalled running task to another team member (the lead's team).
+#[tauri::command]
+async fn reassign_task(orchestra: State<'_, Orchestra>, task_id: String, member_id: Option<String>) -> Result<(), String> {
+    orchestra.reassign_task(&task_id, member_id).await
+}
+
 #[tauri::command]
 async fn cancel_prompt(
     hub: State<'_, Hub>,
@@ -610,6 +616,7 @@ pub fn run() {
             delete_team,
             send_prompt,
             cancel_prompt,
+            reassign_task,
             respond_permission,
             set_config_option,
             set_mode,
@@ -649,6 +656,7 @@ pub fn run() {
             files::fs_copy,
             files::fs_trash,
             search::search_text,
+            search::list_files,
             git::git_status,
             git::git_stage,
             git::git_unstage,

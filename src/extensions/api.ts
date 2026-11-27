@@ -23,12 +23,59 @@ export interface ExtensionManifest {
   publisher?: string;
   /** Minimum Baton version, e.g. "0.2.6". */
   baton?: string;
+  /** SPDX id of the original work's license, e.g. "MIT" (themes and grammars ported from elsewhere). */
+  license?: string;
+  /** Original author / project credited, e.g. "Catppuccin". */
+  author?: string;
+  /** Project page of the original work. */
+  homepage?: string;
   contributes: ExtensionContributes;
 }
 
 export interface ExtensionContributes {
   languages?: LanguageContribution[];
+  themes?: ThemeContribution[];
   [kind: string]: unknown;
+}
+
+/** App color tokens a theme may set: the CSS variables in src/styles.css without "--". */
+export const THEME_COLOR_KEYS = [
+  "bg", "sidebar", "surface", "surface-2", "surface-3", "hover", "border",
+  "text", "text-2", "muted",
+  "accent", "accent-soft", "on-accent", "brand", "brand-soft",
+  "danger", "danger-soft", "ok", "warn", "add-bg", "del-bg", "code-bg",
+] as const;
+export type ThemeColorKey = (typeof THEME_COLOR_KEYS)[number];
+
+/** Editor syntax colors: the `--cm-<key>` variables in src/components/code/code.css. */
+export const THEME_SYNTAX_KEYS = [
+  "keyword", "string", "comment", "number", "type", "func", "var", "prop", "op", "tag", "heading",
+] as const;
+export type ThemeSyntaxKey = (typeof THEME_SYNTAX_KEYS)[number];
+
+/** Terminal (xterm) colors. */
+export const THEME_TERMINAL_KEYS = [
+  "background", "foreground", "cursor", "selection",
+  "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white",
+  "brightBlack", "brightRed", "brightGreen", "brightYellow", "brightBlue", "brightMagenta", "brightCyan", "brightWhite",
+] as const;
+export type ThemeTerminalKey = (typeof THEME_TERMINAL_KEYS)[number];
+
+/**
+ * A color theme. Values are CSS colors: `#rgb`, `#rrggbb`, `#rrggbbaa`,
+ * `rgb(...)` or `hsl(...)` (space or comma syntax, optional alpha). Missing
+ * keys fall back to Baton's built-in light/dark value for `type`; missing
+ * terminal colors are derived from `colors` as today.
+ */
+export interface ThemeContribution {
+  /** `[a-z0-9-]+`, unique within the extension, e.g. "mocha". */
+  id: string;
+  /** Display name, e.g. "Catppuccin Mocha". */
+  name: string;
+  type: "light" | "dark";
+  colors: Partial<Record<ThemeColorKey, string>>;
+  syntax?: Partial<Record<ThemeSyntaxKey, string>>;
+  terminal?: Partial<Record<ThemeTerminalKey, string>>;
 }
 
 export interface LanguageContribution {
@@ -91,7 +138,10 @@ export interface RegistryEntry {
   description?: string;
   publisher?: string;
   baton?: string;
-  /** Contribution kinds it provides, e.g. ["languages"]. */
+  license?: string;
+  author?: string;
+  homepage?: string;
+  /** Contribution kinds it provides, e.g. ["languages"] or ["themes"]. */
   kinds: string[];
   /** Short tags for search, e.g. language ids and file extensions. */
   keywords?: string[];

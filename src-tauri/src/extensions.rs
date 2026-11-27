@@ -34,6 +34,12 @@ pub struct ExtensionManifest {
     pub publisher: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub baton: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub homepage: Option<String>,
     /// Kind -> entries. Unknown kinds are kept verbatim.
     #[serde(default)]
     pub contributes: Map<String, Value>,
@@ -59,6 +65,12 @@ pub struct RegistryEntry {
     pub publisher: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub baton: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub homepage: Option<String>,
     #[serde(default)]
     pub kinds: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -659,6 +671,25 @@ mod tests {
         assert!(matches!(parse_source(r"C:\reg\index.json"), Ok(Source::Local(_))));
     }
 
+    #[test]
+    fn credit_fields_round_trip() {
+        let m: ExtensionManifest = serde_json::from_str(
+            r#"{"id":"theme-x","name":"X","version":"1.0.0","license":"MIT","author":"Someone","homepage":"https://example.com","contributes":{}}"#,
+        )
+        .unwrap();
+        assert_eq!(m.license.as_deref(), Some("MIT"));
+        let back: ExtensionManifest = serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
+        assert_eq!(back, m);
+        let e: RegistryEntry = serde_json::from_str(
+            r#"{"id":"theme-x","name":"X","version":"1.0.0","author":"A","homepage":"h","kinds":["themes"],"files":[]}"#,
+        )
+        .unwrap();
+        let v = serde_json::to_value(&e).unwrap();
+        assert_eq!(v["author"], "A");
+        assert_eq!(v["homepage"], "h");
+        assert!(v.get("license").is_none());
+    }
+
     fn entry_for(id: &str, version: &str, files: &[(&str, &[u8])]) -> RegistryEntry {
         RegistryEntry {
             id: id.into(),
@@ -667,6 +698,9 @@ mod tests {
             description: None,
             publisher: None,
             baton: None,
+            license: None,
+            author: None,
+            homepage: None,
             kinds: vec!["languages".into()],
             keywords: None,
             files: files

@@ -45,6 +45,10 @@ const MAX_TASK_ATTACHMENTS: usize = 10;
 const LIMIT_BACKOFF: Duration = Duration::from_secs(30 * 60);
 /// Most times one task moves to another member after hitting a limit.
 const MAX_REASSIGN: usize = 2;
+/// A running task with no session update for this long is flagged as stalled.
+const STALL_AFTER: Duration = Duration::from_secs(4 * 60);
+/// How often running tasks are checked for stalling.
+const STALL_CHECK_EVERY: Duration = Duration::from_secs(15);
 
 const INSTRUCTIONS: &str = "\
 You are the lead agent in Baton, a desktop workspace where several coding agents work together.
@@ -69,6 +73,7 @@ You can hand work to team members with the baton tools:
   when the whole request is a quick question or a one-line change.
 - The user can message a member directly; those messages come back to you as user_notes.
 - Tool results may carry user_messages the user typed meanwhile; follow them.
+- If a task report says it is stalled, cancel it and delegate it to another member (or use the same brief).
 - Answer the user in the language they used.";
 
 /// Sent ahead of each user message to a lead (not shown in the UI). Server
@@ -83,6 +88,7 @@ The user turned on agent mode: split the work across your team instead of doing 
 When delegating, name the relevant files, functions, and exact checks to run so members don't have to explore.
 Tool results may carry user_messages the user typed meanwhile; follow them.
 Work alone only if the whole request is a quick question or a one-line change.
+If a task report says it is stalled, cancel it and delegate it to another member (or use the same brief).
 When a task adds, removes or moves files or changes commands or conventions, tell that member to update AGENTS.md (if the repo has one) in the same task.
 ";
 
@@ -175,6 +181,10 @@ pub struct TaskInfo {
     pub limit_hit: bool,
     /// Cumulative token usage across every turn this task has run.
     pub usage: Option<TaskUsage>,
+    /// Since when (ms) a running task has had no activity; set once it has been
+    /// silent for `STALL_AFTER`, cleared when it speaks again or moves.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stalled_since: Option<u64>,
 }
 
 struct Task {
@@ -191,6 +201,12 @@ struct Task {
     sandbox: Option<Sandbox>,
     /// Files sent with the next turn: the brief's, then each follow-up's own.
     attachments: Vec<String>,
+    /// Last moment (ms) the task showed life: turn start or any session update.
+    last_activity_ms: u64,
+    /// The running turn is the task's first, so it may still move to another member.
+    movable: bool,
+    /// Member the user asked to move the task to; picked up by `run_turn`.
+    reassign_to: Option<Member>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -274,6 +290,13 @@ impl Orchestra {
                     }
                 }
                 Err(e) => eprintln!("baton MCP server failed to start: {e}"),
+            }
+        });
+        let ticker_app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            loop {
+                tokio::time::sleep(STALL_CHECK_EVERY).await;
+                ticker_app.state::<Orchestra>().check_stalls();
             }
         });
         let root = app
@@ -436,6 +459,11 @@ impl Orchestra {
         };
         let mut tasks = self.tasks.lock().unwrap();
         let Some(task) = tasks.get_mut(&task_id) else { return };
+        task.last_activity_ms = now_ms();
+        let resumed = task.info.stalled_since.take().is_some().then(|| task.info.clone());
+        if let Some(info) = resumed {
+            let _ = self.app.emit("task-update", info);
+        }
         match update.get("sessionUpdate").and_then(Value::as_str) {
             Some("agent_message_chunk") => {
                 if let Some(text) = update.pointer("/content/text").and_then(Value::as_str) {
@@ -450,6 +478,72 @@ impl Orchestra {
             Some("tool_call") => task.after_tool = true,
             _ => {}
         }
+    }
+
+    /// Flag running tasks that went silent. A task waiting on a permission prompt
+    /// the user hasn't answered isn't stalled: its idle clock restarts instead.
+    fn check_stalls(&self) {
+        let hub = self.app.state::<Hub>();
+        let now = now_ms();
+        let mut flagged = Vec::new();
+        {
+            let mut tasks = self.tasks.lock().unwrap();
+            for task in tasks.values_mut() {
+                if task.info.status != "running" || task.info.stalled_since.is_some() {
+                    continue;
+                }
+                if !is_stalled(task.last_activity_ms, now) {
+                    continue;
+                }
+                let waiting = task.info.session_id.as_deref().is_some_and(|s| hub.has_pending_permission(&task.info.agent_id, s));
+                if waiting {
+                    task.last_activity_ms = now;
+                    continue;
+                }
+                task.info.stalled_since = Some(task.last_activity_ms);
+                flagged.push(task.info.clone());
+            }
+        }
+        for info in flagged {
+            let _ = self.app.emit("task-update", info);
+        }
+    }
+
+    /// Move a running task (first turn only) to another member: `member_id` from
+    /// its lead's team, else the usual fallback pick. The running prompt is
+    /// cancelled and `run_turn` restarts the task on the new member.
+    pub async fn reassign_task(&self, task_id: &str, member_id: Option<String>) -> Result<(), String> {
+        let hub = self.app.state::<Hub>();
+        let (current, lead_agent, lead_session, target) = {
+            let tasks = self.tasks.lock().unwrap();
+            let task = tasks.get(task_id).ok_or("작업을 찾을 수 없어요.")?;
+            if task.info.status != "running" || !task.movable || task.cancel_requested {
+                return Err("실행 중인 작업만 다른 팀원에게 넘길 수 있어요.".into());
+            }
+            let session = task.info.session_id.clone().ok_or("작업이 아직 시작되지 않았어요.")?;
+            (task.member.clone(), task.info.lead_agent_id.clone(), task.info.lead_session_id.clone(), (task.info.agent_id.clone(), session))
+        };
+        let team_id = self
+            .leads
+            .lock()
+            .unwrap()
+            .values()
+            .find(|l| l.agent_id == lead_agent && l.session_id.as_deref() == Some(lead_session.as_str()))
+            .map(|l| l.team_id.clone())
+            .ok_or("이 작업을 맡긴 리드를 찾을 수 없어요.")?;
+        let team = self.app.state::<Teams>().get(&team_id);
+        let next = pick_reassign_target(&team, &current, member_id.as_deref(), |m| self.limited_until(&hub, m).is_some(), |a| installed(&hub, a))
+            .ok_or("넘길 수 있는 다른 팀원이 없어요.")?;
+        {
+            let mut tasks = self.tasks.lock().unwrap();
+            let task = tasks.get_mut(task_id).ok_or("작업을 찾을 수 없어요.")?;
+            if task.info.status != "running" {
+                return Err("실행 중인 작업만 다른 팀원에게 넘길 수 있어요.".into());
+            }
+            task.reassign_to = Some(next);
+        }
+        let _ = hub.cancel(&target.0, &target.1).await;
+        Ok(())
     }
 
     /// A user message typed into a task's own chat; reported back to the lead.
@@ -536,6 +630,8 @@ impl Orchestra {
     fn set_status(&self, task_id: &str, status: &str) {
         if let Some(task) = self.tasks.lock().unwrap().get_mut(task_id) {
             task.info.status = status.into();
+            task.info.stalled_since = None;
+            task.last_activity_ms = now_ms();
             if status == "running" && task.info.started_at.is_none() {
                 task.info.started_at = Some(now_ms());
             }
@@ -684,6 +780,7 @@ impl Orchestra {
             reassigned: Vec::new(),
             limit_hit: false,
             usage: None,
+            stalled_since: None,
         };
         self.tasks.lock().unwrap().insert(
             id.clone(),
@@ -698,6 +795,9 @@ impl Orchestra {
                 cancel_requested: false,
                 sandbox: None,
                 attachments,
+                last_activity_ms: now_ms(),
+                movable: false,
+                reassign_to: None,
             },
         );
         self.emit_task(&id);
@@ -966,6 +1066,26 @@ fn format_tokens_report(u: TaskUsage) -> String {
     out
 }
 
+/// True when a running task's last activity (ms) is at least `STALL_AFTER` ago.
+fn is_stalled(last_activity_ms: u64, now_ms: u64) -> bool {
+    now_ms.saturating_sub(last_activity_ms) >= STALL_AFTER.as_millis() as u64
+}
+
+/// Who a stalled `current` member's task moves to: the requested member of the
+/// team if it can take it, else the usual fallback pick.
+fn pick_reassign_target(
+    team: &Team,
+    current: &Member,
+    requested: Option<&str>,
+    is_limited: impl Fn(&Member) -> bool,
+    installed: impl Fn(&str) -> bool,
+) -> Option<Member> {
+    if let Some(id) = requested {
+        return team.members.iter().find(|m| m.id == id && m.id != current.id && installed(&m.agent_id)).cloned();
+    }
+    pick_fallback(team, current, is_limited, installed)
+}
+
 fn task_report(task: &Task, now: u64) -> Value {
     let elapsed = task.info.started_at.map(|s| task.info.ended_at.unwrap_or(now).saturating_sub(s) / 1000);
     let mut result: String = task.result.chars().take(MAX_RESULT_CHARS).collect();
@@ -990,6 +1110,12 @@ fn task_report(task: &Task, now: u64) -> Value {
     });
     if !task.info.reassigned.is_empty() {
         out["reassigned"] = json!(task.info.reassigned.join("; "));
+    }
+    if let Some(since) = task.info.stalled_since.filter(|_| task.info.status == "running") {
+        out["stalled"] = json!(format!(
+            "no activity for {}m — consider cancel + delegate to another member",
+            now.saturating_sub(since) / 60_000
+        ));
     }
     if let Some(usage) = task.info.usage {
         out["tokens"] = json!(format_tokens_report(usage));
@@ -1208,6 +1334,8 @@ async fn run_turn(app: AppHandle, token: String, task_id: String, message: Strin
         let session_id = {
             let mut tasks = orch.tasks.lock().unwrap();
             let Some(t) = tasks.get_mut(&task_id) else { return };
+            t.movable = first;
+            t.reassign_to = None;
             t.answer.clear();
             t.after_tool = false;
             t.info.session_id.clone()
@@ -1232,6 +1360,20 @@ async fn run_turn(app: AppHandle, token: String, task_id: String, message: Strin
                 outcome = Err(answer.trim().to_string());
             }
         }
+        // The user asked to move a stalled task: same restart path as a limit.
+        let manual = orch
+            .tasks
+            .lock()
+            .unwrap()
+            .get_mut(&task_id)
+            .and_then(|t| {
+                t.movable = false;
+                t.reassign_to.take()
+            })
+            .filter(|_| first && !cancelled(&orch));
+        let (next, why, by_limit) = if let Some(next) = manual {
+            (next, "stalled", false)
+        } else {
         let error = match &outcome {
             Err(e) if is_limit_error(e) && !cancelled(&orch) => e.clone(),
             _ => break outcome,
@@ -1256,9 +1398,11 @@ async fn run_turn(app: AppHandle, token: String, task_id: String, message: Strin
                 member.id
             ));
         };
+        (next, "usage limit", true)
+        };
 
         // Move the task, then start it afresh on the new member in the same folder.
-        let note = format!("{} → {} (usage limit)", member.id, next.id);
+        let note = format!("{} → {} ({why})", member.id, next.id);
         if let Some(t) = orch.tasks.lock().unwrap().get_mut(&task_id) {
             t.member = next.clone();
             t.info.member_id = next.id.clone();
@@ -1266,7 +1410,11 @@ async fn run_turn(app: AppHandle, token: String, task_id: String, message: Strin
             t.info.agent_id = next.agent_id.clone();
             t.info.session_id = None;
             t.info.reassigned.push(note.clone());
-            t.info.limit_hit = true;
+            t.info.stalled_since = None;
+            t.last_activity_ms = now_ms();
+            if by_limit {
+                t.info.limit_hit = true;
+            }
         }
         // The old session's late updates must not end up in the new answer.
         orch.by_session.lock().unwrap().remove(&(member.agent_id.clone(), session_id));
@@ -1275,7 +1423,9 @@ async fn run_turn(app: AppHandle, token: String, task_id: String, message: Strin
             break Err(format!("reassigned {note}, but the new member failed to start: {e}"));
         }
         member = next;
-        switches += 1;
+        if by_limit {
+            switches += 1;
+        }
         if cancelled(&orch) {
             orch.set_status(&task_id, "cancelled");
             return;
@@ -1286,9 +1436,9 @@ async fn run_turn(app: AppHandle, token: String, task_id: String, message: Strin
         let mut tasks = orch.tasks.lock().unwrap();
         let Some(t) = tasks.get_mut(&task_id) else { return };
         t.result = std::mem::take(&mut t.answer);
-        if switches > 0 {
+        if !t.info.reassigned.is_empty() {
             t.result = format!(
-                "[Baton] Reassigned {} after usage limits; the report below is from '{}'.\n\n{}",
+                "[Baton] Reassigned {}; the report below is from '{}'.\n\n{}",
                 t.info.reassigned.join(", then "),
                 t.info.member_id,
                 t.result
@@ -2110,6 +2260,7 @@ mod tests {
                 reassigned: Vec::new(),
                 limit_hit: false,
                 usage: None,
+                stalled_since: None,
             },
             member,
             cwd: "/work".into(),
@@ -2120,6 +2271,9 @@ mod tests {
             cancel_requested: false,
             sandbox: None,
             attachments: Vec::new(),
+            last_activity_ms: 0,
+            movable: false,
+            reassign_to: None,
         }
     }
 
@@ -2360,6 +2514,7 @@ mod tests {
                 cached_read_tokens: 95_000,
                 cached_write_tokens: 0,
             }),
+            stalled_since: None,
         };
         let serialized = serde_json::to_value(&info).unwrap();
         assert_eq!(
@@ -2427,6 +2582,51 @@ mod tests {
         task.info.usage = Some(TaskUsage { input_tokens: 850, output_tokens: 42, cached_read_tokens: 0, ..Default::default() });
         let without_cached = task_report(&task, 5000);
         assert_eq!(without_cached["tokens"], json!("read 850 · out 42"));
+    }
+
+    #[test]
+    fn stall_detection_and_report_field() {
+        let after = STALL_AFTER.as_millis() as u64;
+        assert!(!is_stalled(1_000, 1_000 + after - 1));
+        assert!(is_stalled(1_000, 1_000 + after));
+        assert!(!is_stalled(5_000, 1_000));
+
+        let mut task = test_task("t1", "claude", "lead");
+        assert!(task_report(&task, 500_000).get("stalled").is_none());
+        task.info.stalled_since = Some(100_000);
+        assert_eq!(
+            task_report(&task, 100_000 + 6 * 60_000)["stalled"],
+            json!("no activity for 6m — consider cancel + delegate to another member")
+        );
+        task.info.status = "done".into();
+        assert!(task_report(&task, 500_000).get("stalled").is_none());
+        assert!(INSTRUCTIONS.contains("says it is stalled, cancel it"));
+        assert!(LEAD_PREAMBLE.contains("says it is stalled, cancel it"));
+    }
+
+    #[test]
+    fn reassign_target_prefers_requested_member() {
+        let team: Team = serde_json::from_value(json!({
+            "id": "t", "name": "T",
+            "members": [
+                { "id": "a", "name": "A", "agentId": "claude" },
+                { "id": "b", "name": "B", "agentId": "codex" },
+                { "id": "c", "name": "C", "agentId": "dsh" },
+            ]
+        }))
+        .unwrap();
+        let a = team.members[0].clone();
+        let id = |m: Option<Member>| m.map(|m| m.id);
+        let ok = |_: &str| true;
+        assert_eq!(id(pick_reassign_target(&team, &a, Some("c"), |_| false, ok)), Some("c".into()));
+        // Requested member is the same one, unknown, or not installed: no move.
+        assert_eq!(id(pick_reassign_target(&team, &a, Some("a"), |_| false, ok)), None);
+        assert_eq!(id(pick_reassign_target(&team, &a, Some("zzz"), |_| false, ok)), None);
+        assert_eq!(id(pick_reassign_target(&team, &a, Some("c"), |_| false, |g| g != "dsh")), None);
+        // No request: the usual fallback, never the member itself.
+        let auto = id(pick_reassign_target(&team, &a, None, |_| false, ok));
+        assert!(matches!(auto.as_deref(), Some("b" | "c")));
+        assert_eq!(id(pick_reassign_target(&team, &a, None, |_| true, ok)), None);
     }
 
     #[test]

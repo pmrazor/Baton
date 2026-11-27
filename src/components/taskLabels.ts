@@ -15,6 +15,17 @@ export const TASK_STATUS: Record<TaskStatus, { label: string; tone: string }> = 
   cancelled: { label: "중단됨", tone: "lock" },
 };
 
+/** Whole minutes a stalled task has been silent (at least 1). */
+export function stalledMinutes(stalledSince: number, now: number): number {
+  return Math.max(1, Math.floor((now - stalledSince) / 60_000));
+}
+
+/** Warning for a running task that stopped responding; null when it isn't flagged. */
+export function stalledLine(task: Pick<TaskInfo, "status" | "stalledSince">, now: number): string | null {
+  if (task.status !== "running" || task.stalledSince == null) return null;
+  return `멈춘 것 같아요 · ${stalledMinutes(task.stalledSince, now)}분째 응답이 없어요`;
+}
+
 export const LIMIT_FAILED_LABEL = "한도 때문에 중단됨";
 export const DISCARDED_EMPTY_LABEL = "변경 없이 정리됨";
 export const DISCARDED_CHANGES_LABEL = "변경을 버렸어요";

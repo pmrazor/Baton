@@ -24,6 +24,7 @@ import {
   type ProViewId,
 } from "./proLayoutState";
 import { onRevealInTree } from "./code/editorStore";
+import { onProViewRequest } from "../codeNav";
 import { detectPlatform } from "./code/codeHelpers";
 import { isSearchShortcut } from "./search/searchHelpers";
 import { requestSearchFocus } from "./search/searchStore";
@@ -138,6 +139,24 @@ export default function ProLayout(p: ProLayoutProps) {
       setLastView("files");
     });
   }, [cwd]);
+
+  // Allow command palette actions to toggle or open Pro mode views.
+  useEffect(() => {
+    return onProViewRequest((id, mode) => {
+      if (mode === "open") {
+        setActiveView(id);
+        setLastView(id);
+        if (id === "search") requestSearchFocus();
+        return;
+      }
+      setActiveView((prev) => {
+        const next = toggleProView(prev, id);
+        if (next) setLastView(next);
+        if (next === "search") requestSearchFocus();
+        return next;
+      });
+    });
+  }, []);
 
   const reopenChatButton =
     chatPanelMode === "collapsed" ? (

@@ -39,6 +39,7 @@ import {
   getRootEditorView,
   onTabClosed,
   onTabRenamed,
+  onToggleBlame,
   openDiff,
   openFile,
   registerRoot,
@@ -824,6 +825,8 @@ export default function CodeEditor({ root }: CodeEditorProps) {
       return !prev;
     });
   }, []);
+
+  useEffect(() => onToggleBlame(toggleBlame), [toggleBlame]);
 
   // Mount or switch DiffSession DOM when an active diff tab is ready.
   const isDiffReady = isDiffTab && activeRuntime?.load.status === "ready";

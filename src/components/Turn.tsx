@@ -77,10 +77,12 @@ interface TurnProps {
   onOpenTaskDiff?: (hash: string, path: string) => void;
   /** The lead conversation is responding. */
   leadBusy?: boolean;
+  /** Item id being revealed from search; expands collapsed process group if needed. */
+  revealItemId?: string | null;
 }
 
 export function TurnView(p: TurnProps) {
-  const { turn, running, isLast, tasks, agents, permissions, onOpen, onPermission } = p;
+  const { turn, running, isLast, tasks, agents, permissions, onOpen, onPermission, revealItemId } = p;
   return (
     <>
       {turn.user && <ChatItemView item={turn.user} isLast={false} />}
@@ -94,6 +96,7 @@ export function TurnView(p: TurnProps) {
           streaming={running && !turn.answer}
           startedAt={turn.user?.startedAt}
           durationMs={turn.user?.durationMs}
+          revealItemId={revealItemId}
         />
       )}
       {tasks && tasks.length > 0 && (
@@ -124,10 +127,15 @@ function ProcessGroup(p: {
   streaming: boolean;
   startedAt?: number;
   durationMs?: number;
+  revealItemId?: string | null;
 }) {
   // Follows the turn (open while running, folded when done) until the user toggles it.
   const [userOpen, setUserOpen] = useState<boolean | null>(null);
-  const open = userOpen ?? p.running;
+  const hasReveal = Boolean(p.revealItemId && p.steps.some((s) => s.id === p.revealItemId));
+  useEffect(() => {
+    if (hasReveal) setUserOpen(true);
+  }, [hasReveal, p.revealItemId]);
+  const open = userOpen ?? (p.running || hasReveal);
   const [now, setNow] = useState(Date.now());
 
   useEffect(() => {
@@ -170,7 +178,7 @@ function Step({ item, live }: { item: ChatItem; live: boolean }) {
       return <PlanView entries={item.entries} />;
     case "assistant":
       return (
-        <div className="process-note">
+        <div className="process-note" data-item-id={item.id}>
           <Md text={item.text} />
         </div>
       );

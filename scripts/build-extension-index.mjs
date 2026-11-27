@@ -14,6 +14,26 @@ const MAX_FILE_SIZE = 1024 * 1024;
 const ID_RE = /^[a-z0-9-]+$/;
 const VERSION_RE = /^\d+\.\d+\.\d+$/;
 
+const THEME_COLOR_KEYS = new Set([
+  "bg", "sidebar", "surface", "surface-2", "surface-3", "hover", "border",
+  "text", "text-2", "muted",
+  "accent", "accent-soft", "on-accent", "brand", "brand-soft",
+  "danger", "danger-soft", "ok", "warn", "add-bg", "del-bg", "code-bg",
+]);
+const THEME_SYNTAX_KEYS = new Set([
+  "keyword", "string", "comment", "number", "type", "func", "var", "prop", "op", "tag", "heading",
+]);
+const THEME_TERMINAL_KEYS = new Set([
+  "background", "foreground", "cursor", "selection",
+  "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white",
+  "brightBlack", "brightRed", "brightGreen", "brightYellow", "brightBlue", "brightMagenta", "brightCyan", "brightWhite",
+]);
+const RGB_PART = "(?:25[0-5]|2[0-4]\\d|1?\\d?\\d)";
+const COLOR_RE = /^#(?:[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/;
+const RGB_RE = new RegExp(
+  `^rgb\\(\\s*${RGB_PART}\\s+${RGB_PART}\\s+${RGB_PART}\\s*\\/\\s*(?:100|[1-9]?\\d)%\\s*\\)$`,
+);
+
 function fail(message) {
   console.error(`build-extension-index: ${message}`);
   process.exit(1);
@@ -135,17 +155,65 @@ async function validateLanguage(extensionId, index, language, dir) {
   }
 }
 
-function keywordsFor(languages) {
+function isColor(value) {
+  return typeof value === "string" && (COLOR_RE.test(value) || RGB_RE.test(value));
+}
+
+function validateThemeColors(extensionId, index, kind, colors, knownKeys) {
+  const where = `${extensionId}: contributes.themes[${index}].${kind}`;
+  if (!isPlainObject(colors)) fail(`${where} must be an object`);
+  for (const [key, value] of Object.entries(colors)) {
+    if (!knownKeys.has(key)) {
+      console.warn(`build-extension-index: ${where}.${key} is not a known ${kind} key (ignored)`);
+      continue;
+    }
+    if (!isColor(value)) {
+      fail(`${where}.${key} must be #rrggbb, #rrggbbaa or rgb(r g b / NN%)`);
+    }
+  }
+}
+
+function validateTheme(extensionId, index, theme) {
+  const where = `${extensionId}: contributes.themes[${index}]`;
+  if (!isPlainObject(theme)) fail(`${where} must be an object`);
+  if (typeof theme.id !== "string" || !ID_RE.test(theme.id)) {
+    fail(`${where}.id must match ${ID_RE}`);
+  }
+  if (typeof theme.name !== "string" || !theme.name.trim()) {
+    fail(`${where}.name is required`);
+  }
+  if (theme.type !== "light" && theme.type !== "dark") {
+    fail(`${where}.type must be "light" or "dark"`);
+  }
+  if (!isPlainObject(theme.colors)) fail(`${where}.colors is required`);
+  validateThemeColors(extensionId, index, "colors", theme.colors, THEME_COLOR_KEYS);
+  if (theme.syntax !== undefined) {
+    validateThemeColors(extensionId, index, "syntax", theme.syntax, THEME_SYNTAX_KEYS);
+  }
+  if (theme.terminal !== undefined) {
+    validateThemeColors(extensionId, index, "terminal", theme.terminal, THEME_TERMINAL_KEYS);
+  }
+}
+
+function keywordsFor(languages, themes) {
   const keywords = [];
   const add = (value) => {
     if (typeof value === "string" && value.trim() && !keywords.includes(value)) {
       keywords.push(value);
     }
   };
-  for (const language of languages) {
+  for (const language of languages ?? []) {
     add(language.id);
     for (const extension of language.extensions ?? []) add(extension);
     for (const filename of language.filenames ?? []) add(filename);
+  }
+  if (themes && themes.length > 0) {
+    add("theme");
+    for (const theme of themes) {
+      add(theme.type);
+      add(theme.id);
+      add(theme.name);
+    }
   }
   return keywords;
 }
@@ -186,11 +254,32 @@ async function loadExtension(folderName) {
   }
 
   const languages = manifest.contributes.languages;
-  if (!Array.isArray(languages) || languages.length === 0) {
-    fail(`${folderName}: contributes.languages must be a non-empty array`);
+  if (languages !== undefined) {
+    if (!Array.isArray(languages) || languages.length === 0) {
+      fail(`${folderName}: contributes.languages must be a non-empty array`);
+    }
+    for (const [index, language] of languages.entries()) {
+      await validateLanguage(manifest.id, index, language, dir);
+    }
   }
-  for (const [index, language] of languages.entries()) {
-    await validateLanguage(manifest.id, index, language, dir);
+
+  const themes = manifest.contributes.themes;
+  if (themes !== undefined) {
+    if (!Array.isArray(themes) || themes.length === 0) {
+      fail(`${folderName}: contributes.themes must be a non-empty array`);
+    }
+    const themeIds = new Set();
+    for (const [index, theme] of themes.entries()) {
+      validateTheme(manifest.id, index, theme);
+      if (themeIds.has(theme.id)) {
+        fail(`${folderName}: contributes.themes[${index}].id "${theme.id}" is duplicated`);
+      }
+      themeIds.add(theme.id);
+    }
+  }
+
+  if (languages === undefined && themes === undefined) {
+    fail(`${folderName}: contributes must have a non-empty languages or themes array`);
   }
 
   const files = [];
@@ -219,8 +308,11 @@ async function loadExtension(folderName) {
   if (typeof manifest.description === "string") entry.description = manifest.description;
   if (typeof manifest.publisher === "string") entry.publisher = manifest.publisher;
   if (typeof manifest.baton === "string") entry.baton = manifest.baton;
+  if (typeof manifest.license === "string") entry.license = manifest.license;
+  if (typeof manifest.author === "string") entry.author = manifest.author;
+  if (typeof manifest.homepage === "string") entry.homepage = manifest.homepage;
   entry.kinds = kinds;
-  entry.keywords = keywordsFor(languages);
+  entry.keywords = keywordsFor(languages, themes);
   entry.files = files;
   return entry;
 }

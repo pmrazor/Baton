@@ -112,6 +112,12 @@ export function taskTransitionNotice(prev: TaskInfo | undefined, next: TaskInfo)
   return `${next.memberName} · ${next.title} ${next.status === "done" ? "끝났어요" : "실패했어요"}`;
 }
 
+/** Fires once, when a running task becomes stalled (silent for minutes). */
+export function taskStalledNotice(prev: TaskInfo | undefined, next: TaskInfo): string | null {
+  if (next.status !== "running" || next.stalledSince == null || prev?.stalledSince != null) return null;
+  return `${next.memberName} · ${next.title}: 응답이 없어요`;
+}
+
 /** Fires when a usage limit moved the task to another member. */
 export function reassignNotice(prev: TaskInfo | undefined, next: TaskInfo): string | null {
   const before = prev?.reassigned?.length ?? 0;
